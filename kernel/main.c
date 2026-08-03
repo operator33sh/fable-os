@@ -440,7 +440,7 @@ static int tg_poll(char *buf, int cap) {
     tg_active_chat_id = chat_id;
 
     int written = snprintf(buf, (size_t)cap,
-        "Telegram message from %s (chat_id %ld): %s",
+        "[Telegram from %s, chat_id=%ld] %s",
         from_name[0] ? from_name : "unknown",
         (long)chat_id, text_buf);
     if (written <= 0 || written >= cap) { tg_active_chat_id = 0; return 0; }
