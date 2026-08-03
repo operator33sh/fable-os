@@ -36,6 +36,7 @@
 #include "app.h"
 #include "capability.h"
 #include "cc.h"
+#include "invoke.h"
 #include "fiber.h"
 #include "agenda.h"
 #include "fault.h"
@@ -601,6 +602,7 @@ void kernel_main(void) {
             cc_stack_limit_set(stack_lo);
     }
     cc_bringup();
+    invoke_bringup();
 
     concurrency_demo();
 
