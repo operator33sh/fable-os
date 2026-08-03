@@ -877,9 +877,10 @@ static void test_syscall_grants(void) {
     /* A number that is not a syscall is refused by the ASSEMBLER, so a program
      * cannot even be built that names one. */
     CHECK(dvm_assemble("sys r1, 99\nhalt\n", 15, &P, &E) != 0);
-    CHECK(dvm_assemble("sys r1, net.fetch\nhalt\n", 23, &P, &E) != 0);
     CHECK_CONTAINS(E.msg, "not a syscall on this machine");
     CHECK_CONTAINS(E.msg, "fs.read");
+    /* net.fetch is now a valid syscall (DVM_SYS_NET_FETCH); it must assemble. */
+    CHECK_EQ(dvm_assemble("sys r1, net.fetch\nhalt\n", 23, &P, &E), 0);
 
     /* An fs syscall with no root is a POLICY error, not a silent "/" . */
     dvm_policy_init(&POL);

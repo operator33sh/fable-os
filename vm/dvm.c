@@ -25,6 +25,7 @@
  */
 
 #include "dvm.h"
+#include "fetch.h"      /* FETCH_URL_MAX, fetch_result_t, fetch(), FETCH_OK */
 #include "trace.h"
 
 #include <stdarg.h>
@@ -305,6 +306,7 @@ static const struct { const char *name; int8_t arity; } sys_info[DVM_SYS__COUNT]
     [DVM_SYS_FS_SIZE]    = { "fs.size",    2 },
     [DVM_SYS_AUDIO_TONE] = { "audio.tone", 2 },
     [DVM_SYS_TIME_MS]    = { "time.ms",    0 },
+    [DVM_SYS_NET_FETCH]  = { "net.fetch",  4 },
 };
 
 const char *dvm_sys_name(dvm_sys_nr_t nr) {
@@ -1194,6 +1196,18 @@ static const char *label_at(const dvm_program_t *p, uint32_t pc) {
     for (uint32_t i = 0; i < p->nlabel; i++)
         if (p->label[i].pc == pc) return p->label[i].name;
     return NULL;
+}
+
+int dvm_program_find_label(const dvm_program_t *p, const char *name) {
+    if (!p || !name) return -1;
+    for (uint32_t i = 0; i < p->nlabel; i++) {
+        const char *a = p->label[i].name, *b = name;
+        int j = 0;
+        while (j < DVM_LABEL_MAX && a[j] && a[j] == b[j]) j++;
+        if (j == DVM_LABEL_MAX || (a[j] == '\0' && b[j] == '\0'))
+            return (int)p->label[i].pc;
+    }
+    return -1;
 }
 
 /* A string operand is model-authored text, and intern_string() has already
@@ -2347,6 +2361,36 @@ static dvm_status_t sys_call(run_t *st, dvm_sys_nr_t nr, const uint64_t *args,
         rc = sys->time_ms(sys->ctx, err, sizeof err);
         break;
 
+    case DVM_SYS_NET_FETCH: {
+        uint64_t url_off = args[0], url_len = args[1];
+        uint64_t dst_off = args[2], dst_cap = args[3];
+        if ((s = mem_span(st, url_off, url_len, "net.fetch url")) != DVM_OK) return s;
+        if (url_len == 0 || url_len >= FETCH_URL_MAX)
+            return trap(st, DVM_TRAP_SYS_DENIED,
+                        "net.fetch: url length %lu is outside 1..%d",
+                        (unsigned long)url_len, FETCH_URL_MAX - 1);
+        if ((s = mem_span(st, dst_off, dst_cap, "net.fetch dst")) != DVM_OK) return s;
+        if ((s = mem_charge(st, url_len + dst_cap, "net.fetch")) != DVM_OK) return s;
+        /* Copy url out of scratch (already bounds-checked) into a kernel buffer
+         * so the hook receives a stable NUL-terminated string. */
+        char url_buf[FETCH_URL_MAX + 1];
+        dz(url_buf, sizeof url_buf);
+        for (uint64_t _i = 0; _i < url_len; _i++)
+            url_buf[_i] = (char)dvm_mem[url_off + _i];
+        if (!sys->net_fetch)
+            return trap(st, DVM_TRAP_NOIO,
+                        "net.fetch: this VM has no network backend");
+        rc = sys->net_fetch(sys->ctx, url_buf, dvm_mem + dst_off,
+                            (size_t)dst_cap, err, sizeof err);
+        if (rc > 0 && dst_cap > 0) {
+            /* Ensure the response is NUL-terminated inside the arena. */
+            uint64_t end = dst_off + (uint64_t)(rc < (int64_t)dst_cap
+                                                ? rc : (int64_t)(dst_cap - 1));
+            if (end < dst_off + dst_cap) dvm_mem[end] = '\0';
+        }
+        break;
+    }
+
     default:
         return trap(st, DVM_TRAP_BADOP, "sys: syscall %d is not implemented", (int)nr);
     }
@@ -3044,9 +3088,9 @@ static dvm_status_t execute(run_t *st) {
     }
 }
 
-dvm_status_t dvm_run(const dvm_program_t *p, const dvm_policy_t *pol,
-                     const dvm_io_t *io, const uint64_t *args, int nargs,
-                     dvm_result_t *res) {
+dvm_status_t dvm_run_at(const dvm_program_t *p, const dvm_policy_t *pol,
+                        const dvm_io_t *io, const uint64_t *args, int nargs,
+                        uint32_t start_pc, dvm_result_t *res) {
     if (!res) return DVM_TRAP_POLICY;
     dz(res, sizeof *res);
 
@@ -3152,6 +3196,20 @@ dvm_status_t dvm_run(const dvm_program_t *p, const dvm_policy_t *pol,
     if (nargs < 0) nargs = 0;
     if (nargs > DVM_NREGS) nargs = DVM_NREGS;
     for (int i = 0; i < nargs && args; i++) st.reg[i] = args[i];
+
+    /* Entry-point: start_pc=0 is the normal case and is already set by dz().
+     * A non-zero start_pc is validated here, after dvm_program_validate() has
+     * confirmed the program is structurally sound, so p->ninsn is trustworthy. */
+    if (start_pc > 0) {
+        if (start_pc >= p->ninsn) {
+            res->status = DVM_TRAP_BADOP;
+            snprintf(res->msg, sizeof res->msg,
+                     "dvm_run_at: start_pc %u is past the end of the program "
+                     "(%u insns)", start_pc, p->ninsn);
+            return DVM_TRAP_BADOP;
+        }
+        st.pc = start_pc;
+    }
 
     /* State the sandbox before running inside it: these lines are the record of
      * what the program was permitted to touch, which is half of any later
@@ -3265,6 +3323,12 @@ dvm_status_t dvm_run(const dvm_program_t *p, const dvm_policy_t *pol,
                       (unsigned long)res->io_ops, (unsigned long)res->delay_us);
     }
     return s;
+}
+
+dvm_status_t dvm_run(const dvm_program_t *p, const dvm_policy_t *pol,
+                     const dvm_io_t *io, const uint64_t *args, int nargs,
+                     dvm_result_t *res) {
+    return dvm_run_at(p, pol, io, args, nargs, 0, res);
 }
 
 /* ====================================================================== */
@@ -3457,6 +3521,22 @@ static int64_t k_time_ms(void *ctx, char *err, size_t errcap) {
     return (int64_t)millis();
 }
 
+static int64_t k_net_fetch(void *ctx, const char *url, void *dst, size_t cap,
+                           char *err, size_t errcap) {
+    (void)ctx;
+    fetch_result_t res;
+    const char *why = NULL;
+    /* fetch() needs a buffer large enough for both headers and body; use dst
+     * directly since the VM has already bounds-checked it against the arena. */
+    int rc = fetch(url, strlen(url), NULL, (char *)dst, cap, &res, &why);
+    if (rc != FETCH_OK) {
+        snprintf(err, errcap, "net.fetch %s: %s", url,
+                 why ? why : fetch_strerror(rc));
+        return (int64_t)rc;
+    }
+    return (int64_t)res.http_status;
+}
+
 static const dvm_sys_t hw_sys = {
     .ctx        = 0,
     .con_write  = k_con_write,
@@ -3465,6 +3545,7 @@ static const dvm_sys_t hw_sys = {
     .fs_size    = k_fs_size,
     .audio_tone = k_audio_tone,
     .time_ms    = k_time_ms,
+    .net_fetch  = k_net_fetch,
 };
 
 const dvm_sys_t *dvm_sys_kernel(void) { return &hw_sys; }

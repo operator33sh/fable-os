@@ -844,8 +844,11 @@ static void put_cmd_bits(char *buf, size_t cap, uint16_t bits) {
  *               one silently erased both for the outer one.
  *   time.ms     a timeout that is a real timeout rather than a loop count.
  *
- * NOT granted, because it does not exist: anything that reaches the network.
- * See include/dvm.h's FUTURE EXTENSION POINTS. */
+ * net.fetch  granted: a program that can fetch a URL can verify its own
+ *            assumptions about an external service, query a config endpoint,
+ *            or download firmware, all without a kernel tool that knows the
+ *            URL in advance. The URL lives in the program's scratch arena, so
+ *            the same sandbox that confines device access confines this one. */
 static void grant_syscalls(dvm_policy_t *pol, char *why, size_t cap) {
     dvm_policy_allow_sys(pol, DVM_SYS_CON_WRITE);
     dvm_policy_allow_sys(pol, DVM_SYS_FS_READ);
@@ -853,6 +856,7 @@ static void grant_syscalls(dvm_policy_t *pol, char *why, size_t cap) {
     dvm_policy_allow_sys(pol, DVM_SYS_FS_SIZE);
     dvm_policy_allow_sys(pol, DVM_SYS_AUDIO_TONE);
     dvm_policy_allow_sys(pol, DVM_SYS_TIME_MS);
+    dvm_policy_allow_sys(pol, DVM_SYS_NET_FETCH);
     if (dvm_policy_set_fs_root(pol, DRV_FS_ROOT) != 0) {
         /* Unreachable with a literal constant, and checked anyway: an fs
          * syscall with no root is a policy error one layer down, and finding
@@ -1839,6 +1843,16 @@ static int t_driver_run(const tool_call_t *c, tool_result_t *r) {
     rc = want_source(&in, r, "driver_run", t.name);
     if (rc != 0) return rc;
 
+    /* ---- optional entry label ---- */
+    char entry_label[DVM_LABEL_MAX + 1];
+    entry_label[0] = '\0';
+    rc = f_str(&in, "entry", entry_label, sizeof entry_label, NULL);
+    if (rc == -1) return fail(r, TOOL_EINVAL, "driver_run", t.name,
+                              "\"entry\" must be a string");
+    if (rc == -2) return fail(r, TOOL_EINVAL, "driver_run", t.name,
+                              "\"entry\" must be at most %d characters", DVM_LABEL_MAX);
+    int has_entry = (rc == 1);
+
     /* ---- the sandbox: derived from the device, or from nothing ---- */
     ensure_fs_root();
     sandbox_t sb;
@@ -1913,9 +1927,22 @@ static int t_driver_run(const tool_call_t *c, tool_result_t *r) {
                  bits, had);
     }
 
+    /* ---- resolve optional entry label (program now assembled) ---- */
+    uint32_t start_pc = 0;
+    if (has_entry) {
+        int found = dvm_program_find_label(prog, entry_label);
+        if (found < 0) {
+            attempts_record(t.name, 0);
+            kfree(prog);
+            return fail(r, TOOL_EINVAL, "driver_run", t.name,
+                        "label \"%s\" not found in program", entry_label);
+        }
+        start_pc = (uint32_t)found;
+    }
+
     /* ---- run it ---- */
     dvm_result_t res;
-    dvm_status_t st = dvm_run(prog, &sb.pol, rio, sb.args, sb.nargs, &res);
+    dvm_status_t st = dvm_run_at(prog, &sb.pol, rio, sb.args, sb.nargs, start_pc, &res);
 
     /* Did a DEVICE write outside the buffer? This is the only check on this
      * machine that can notice, and it only notices a near miss. */
@@ -2086,7 +2113,10 @@ static const tool_t driver_run_tool = {
         "and rd = the result; else rd = an error code and the report has the "
         "reason. con.write(off,len) prints a line; fs.read(poff,plen,dst,cap), "
         "fs.write(poff,plen,src,len), fs.size(poff,plen) take paths under /vm only; "
-        "audio.tone(hz,ms); time.ms().\n"
+        "audio.tone(hz,ms); time.ms(); "
+        "net.fetch(url_off,url_len,dst_off,dst_cap) fetches a URL from scratch "
+        "memory and writes the body to scratch at dst_off, NUL-terminated; rd = "
+        "HTTP status (200, 404, …) or negative on transport error.\n"
         "EXAMPLE - build a request, then read a status code out of a reply:\n"
         " mstr r1,0,\"GET /x HTTP/1.1\\r\\nHost: \"\n"
         " mstr r1,r1,\"h.example\\r\\n\\r\\n\" ; r1 = the request's length\n"
@@ -2109,7 +2139,8 @@ static const tool_t driver_run_tool = {
         "\"source\":{\"type\":\"string\",\"description\":\"the program text, one instruction per line\"},"
         "\"trace\":{\"type\":\"string\",\"description\":\"console detail: \\\"off\\\", \\\"io\\\" (default, every device access) or \\\"all\\\" (every instruction)\"},"
         "\"delay_budget_ms\":{\"type\":\"integer\",\"description\":\"ms the program may spend in delay, 0-2000 (default 250)\"},"
-        "\"max_steps\":{\"type\":\"integer\",\"description\":\"instruction budget, 1-1000000 (default 100000)\"}"
+        "\"max_steps\":{\"type\":\"integer\",\"description\":\"instruction budget, 1-1000000 (default 100000)\"},"
+        "\"entry\":{\"type\":\"string\",\"description\":\"label name to start execution at instead of the first instruction; useful for programs with multiple named routines\"}"
         "},\"required\":[\"source\"]}",
     .flags  = TOOL_MUTATES,
     .invoke = t_driver_run,

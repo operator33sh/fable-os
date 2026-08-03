@@ -233,9 +233,12 @@
  *     new entry in that file's capability table calling capability_invoke(),
  *     with the rate limit that is already there. Reported, not written: apps/ is
  *     not this module's to edit.
- *   - TEXT ARGUMENTS across a call need somewhere for bytes to live that
- *     dvm_run() does not zero. The honest shape is a per-run scratch WINDOW in
- *     vm/dvm.c (its own header names it) rather than anything here.
+ *   - TEXT ARGUMENTS: capability_invoke_text() now provides a thin wrapper that
+ *     writes each string to <data_root>/_cap_arg{n} before calling through to
+ *     capability_invoke(), so programs can read them with fs.read. The slot
+ *     indices (0, 1, …) are passed as the numeric args. A per-run scratch
+ *     WINDOW in vm/dvm.c would be a cleaner future shape, but the file route
+ *     is observable, debuggable, and requires no VM changes.
  *   - A capability that wants a device is really a driver; the seam is
  *     driver_install's. If the two ever merge, the merge point is the sandbox
  *     builder in core/capability.c and nothing above it.
@@ -519,6 +522,9 @@ int capability_delete(const char *name, char *msg, size_t cap);
 
 /* ---- invocation ---- */
 
+/* Maximum number of text arguments accepted by capability_invoke_text(). */
+#define CAP_TEXT_ARGS_MAX 8
+
 /* Call `name` with `nargs` numbers. `nargs` must equal its declared arity —
  * a mismatch is CAP_EINVAL naming both numbers, never a zero-filled register.
  *
@@ -528,6 +534,16 @@ int capability_delete(const char *name, char *msg, size_t cap);
  * come through here. */
 int capability_invoke(const char *name, const uint64_t *args, int nargs,
                       cap_result_t *out);
+
+/* Like capability_invoke() but accepts up to CAP_TEXT_ARGS_MAX string
+ * arguments. Each string is written to <data_root>/_cap_arg{n} before the
+ * call; the capability reads them with fs.read("_cap_arg0", …). Numeric args
+ * passed to the capability are the slot indices 0, 1, … so the program knows
+ * which file to fetch. Returns CAP_EINVAL if ntexts is out of range or if any
+ * write fails; otherwise returns as capability_invoke(). */
+int capability_invoke_text(const char *name,
+                           const char * const *texts, int ntexts,
+                           cap_result_t *out);
 
 /* ---- rendering a composition back to text ---- */
 
