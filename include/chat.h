@@ -253,7 +253,7 @@
  * had already been spent. Do not "fix" a red guard by raising a constant without
  * also raising the one below it in the chain; that is what the static assert in
  * net/net.c is there to stop. */
-#define CHAT_TOOLS_BYTES       57344
+#define CHAT_TOOLS_BYTES       65536
 
 /* WHAT THE 45-TOOL REGISTRY ASSEMBLES TO TODAY, in bytes, measured.
  *

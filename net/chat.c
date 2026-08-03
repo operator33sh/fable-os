@@ -608,8 +608,9 @@ static void tools_load(void) {
     json_value_t v;
     if (need >= sizeof g_state.chat.tools_buf ||
         json_parse(g_state.chat.tools_buf, need, &v) != JSON_OK) {
-        kprintf("[chat: the tool schema does not fit %u bytes - the model will "
-                "be offered %s]\n", (unsigned)sizeof g_state.chat.tools_buf,
+        kprintf("[chat: the tool schema is %zu bytes but the buffer is %u - "
+                "the model will be offered %s]\n",
+                need, (unsigned)sizeof g_state.chat.tools_buf,
                 g_state.chat.tools_ready
                     ? "no tools at all (the schema became invalid during this boot)"
                     : "no tools at all");
