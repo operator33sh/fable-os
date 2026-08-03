@@ -406,6 +406,18 @@ RESIZE_WINDOW = ( W=$$((720 * $(ZOOM))); H=$$((400 * $(ZOOM) + 28)); \
 # down with it.
 QEMU_EXTRA ?=
 
+# Audio: AC97 is the device the driver VM knows how to bring up (see
+# tests/qemu/cases/ac97.case). The backend differs per host OS:
+#   coreaudio  — macOS
+#   pa         — Linux with PulseAudio / PipeWire-PulseAudio
+# Override with e.g. `make run QEMU_AUDIODEV=alsa` if needed.
+ifeq ($(shell uname),Darwin)
+QEMU_AUDIODEV ?= coreaudio
+else
+QEMU_AUDIODEV ?= pa
+endif
+AUDIOFLAGS = -audiodev $(QEMU_AUDIODEV),id=a0 -device AC97,audiodev=a0
+
 # ===========================================================================
 # THE DISK — the only thing on this machine that survives a reboot
 #
@@ -470,10 +482,10 @@ disk-unmount:
 
 run: kernel.bin $(DISK_IMG)
 	@$(RESIZE_WINDOW)
-	@$(KEY_ARGS) qemu-system-x86_64 -kernel kernel.bin $(NETFLAGS) $(DISKFLAGS) $(QEMU_EXTRA) -display $(QEMU_DISPLAY) -serial stdio "$$@"
+	@$(KEY_ARGS) qemu-system-x86_64 -kernel kernel.bin $(NETFLAGS) $(DISKFLAGS) $(AUDIOFLAGS) $(QEMU_EXTRA) -display $(QEMU_DISPLAY) -serial stdio "$$@"
 
 run-nox: kernel.bin $(DISK_IMG)
-	@$(KEY_ARGS) qemu-system-x86_64 -kernel kernel.bin $(NETFLAGS) $(DISKFLAGS) $(QEMU_EXTRA) -display none -serial stdio "$$@"
+	@$(KEY_ARGS) qemu-system-x86_64 -kernel kernel.bin $(NETFLAGS) $(DISKFLAGS) $(AUDIOFLAGS) $(QEMU_EXTRA) -display none -serial stdio "$$@"
 
 # ===========================================================================
 # Bootable media — GRUB, an ISO, and a USB stick
@@ -522,10 +534,10 @@ $(ISO): kernel.bin boot/grub/grub.cfg
 # into memory.
 run-iso: $(ISO)
 	@$(RESIZE_WINDOW)
-	@$(KEY_ARGS) qemu-system-x86_64 -cdrom $(ISO) $(NETFLAGS) -display $(QEMU_DISPLAY) -serial stdio "$$@"
+	@$(KEY_ARGS) qemu-system-x86_64 -cdrom $(ISO) $(NETFLAGS) $(AUDIOFLAGS) $(QEMU_EXTRA) -display $(QEMU_DISPLAY) -serial stdio "$$@"
 
 run-iso-nox: $(ISO)
-	@$(KEY_ARGS) qemu-system-x86_64 -cdrom $(ISO) $(NETFLAGS) -display none -serial stdio "$$@"
+	@$(KEY_ARGS) qemu-system-x86_64 -cdrom $(ISO) $(NETFLAGS) $(AUDIOFLAGS) $(QEMU_EXTRA) -display none -serial stdio "$$@"
 
 # Deliberately does NOT write anything. Picking the wrong /dev/diskN erases a
 # disk, and no build system should guess which one you meant.

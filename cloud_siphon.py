@@ -4,24 +4,43 @@ import json
 import uuid
 import threading
 import time
+import os
 import requests
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # --- CONFIGURATION ---
-OLLAMA_API_KEY = "acd25ddd950d494ba8e637a9187b7c38.wbof3773LpDpMdEorp51478A"
-OLLAMA_BASE_URL = "https://ollama.com"
-OLLAMA_MODEL = "gemma4:31b"
-LISTEN_PORT = 443
-CERT_FILE = "/home/wouter/Development/fable-os/cert.pem"
-KEY_FILE = "/home/wouter/Development/fable-os/key.pem"
+# Secrets live in cloud_siphon.env (gitignored), next to this file.
+# Each line: KEY=value.  Lines starting with # are ignored.
+def _load_env(path):
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = val.strip()
+    except FileNotFoundError:
+        pass
 
-# Telegram bot configuration.
-# Set TELEGRAM_BOT_TOKEN to your bot token from @BotFather.
+_load_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_siphon.env"))
+
+OLLAMA_API_KEY  = os.environ.get("OLLAMA_API_KEY", "")
+OLLAMA_BASE_URL = "https://ollama.com"
+OLLAMA_MODEL    = "gemma4:31b"
+LISTEN_PORT     = 443
+CERT_FILE       = "/home/wouter/Development/fable-os/cert.pem"
+KEY_FILE        = "/home/wouter/Development/fable-os/key.pem"
+
+# Telegram bot configuration — set in cloud_siphon.env.
 # Leave TELEGRAM_ALLOWED_CHAT_IDS empty to accept messages from any chat,
-# or list specific chat IDs to restrict access.
-TELEGRAM_BOT_TOKEN = "8712662367:AAE5JAi3JH12Bw2aB9ETTgeUxFo-zTq6jUE"          # e.g. "123456789:ABC-DEF..."
-TELEGRAM_ALLOWED_CHAT_IDS = [8732428728]   # e.g. [123456789, -1001234567890]
+# or list specific chat IDs (comma-separated) to restrict access.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+_raw_ids = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+TELEGRAM_ALLOWED_CHAT_IDS = [int(x.strip()) for x in _raw_ids.split(",") if x.strip()]
 # ---------------------
 
 # ======================================================================
