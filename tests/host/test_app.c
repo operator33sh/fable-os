@@ -1302,20 +1302,17 @@ static void test_tool_registry_and_schema_cost(void) {
      * that runs away by kilobytes, not to shave bytes. Before raising it, get
      * the true registry total from the banner rather than from a comment.
      *
-     * RAISED 1800 -> 2100 once, and this is the whole justification. A live run
-     * showed the model refusing to build a ticking clock — "this machine can't
-     * tick on its own" — because the description still said "a clock with a
-     * Refresh button", written when app_tick() had no caller. kernel/main.c now
-     * calls it, so that sentence had become false, and the correction costs
-     * 150 bytes. Checked against the numbers, not against a feeling: the
-     * registry is CHAT_REGISTRY_BYTES of CHAT_TOOLS_BYTES=40960, and the
-     * CHAT_REQ_BYTES assertion below covers the second bound. Do not treat 2100
-     * as a target either. */
+     * RAISED 1800 -> 2100 once (ticking clock correction, 150 bytes).
+     * RAISED 2100 -> 2450: added action=launch file=<vfs_path> to enable
+     * persistent apps across reboots via vfs_write + agenda_save (289 bytes).
+     * Checked against the numbers, not against a feeling: the registry is
+     * CHAT_REGISTRY_BYTES of CHAT_TOOLS_BYTES=40960, and the CHAT_REQ_BYTES
+     * assertion below covers the second bound. Do not treat 2450 as a target. */
     size_t cost = wire_cost(t);
-    printf("    (app tool wire cost %zu bytes; ceiling 2100, and the whole "
+    printf("    (app tool wire cost %zu bytes; ceiling 2450, and the whole "
            "45-tool registry is %d of CHAT_TOOLS_BYTES=%d)\n",
            cost, CHAT_REGISTRY_BYTES, CHAT_TOOLS_BYTES);
-    CHECK(cost <= 2100);
+    CHECK(cost <= 2450);
     CHECK(CHAT_REGISTRY_BYTES < CHAT_TOOLS_BYTES);
 
     /* The headroom the banner reports must be real headroom, not a rounding

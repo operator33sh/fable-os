@@ -693,7 +693,7 @@ TESTSRC_test_app := $(APPSRC) tools/app_tools.c \
                     lib/fb.c lib/font.c lib/font_spleen8x16.c \
                     drivers/input/mouse.c core/tool.c lib/trace.c \
                     net/json.c net/model.c net/model_mock.c net/chat.c \
-                    core/state.c
+                    core/state.c fs/vfs/vfs.c fs/native/ramfs.c
 # test_app_format covers the format additions (tick, the time snapshot, rand, at,
 # round) and the shipped examples. No tools and no chat: it drives app_launch(),
 # app_tick() and gui_click_widget() directly, so it needs only the runtime and the
@@ -708,7 +708,8 @@ TESTSRC_test_app_format := $(APPSRC) gui/wm.c gui/widgets.c \
 TESTSRC_test_app_audio := $(APPSRC) gui/wm.c gui/widgets.c \
                     lib/fb.c lib/font.c lib/font_spleen8x16.c \
                     drivers/input/mouse.c net/json.c lib/trace.c \
-                    core/tool.c tools/app_tools.c
+                    core/tool.c tools/app_tools.c \
+                    core/state.c fs/vfs/vfs.c fs/native/ramfs.c
 # calculator_json.h is generated from calculator.json (apps/examples/gen_header.py);
 # both the kernel object that embeds it and the test that diffs it must follow it,
 # and examples_json.h is the same arrangement for the rest of apps/examples/.

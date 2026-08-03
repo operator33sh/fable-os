@@ -58,6 +58,7 @@
 #include "app.h"
 #include "gui.h"
 #include "widgets.h"
+#include "vfs.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -385,43 +386,66 @@ static int do_launch(const json_value_t *in, tool_result_t *r) {
                     "\"x\" and \"y\" must be whole numbers of pixels within "
                     "+/-%d when present", COORD_LIMIT);
 
-    if (json_get(in, "document", &doc) != JSON_OK) {
-        int e = fail(r, TOOL_EINVAL, "action=launch",
-                     "\"document\" is required: the app document itself, as a "
-                     "JSON object");
-        put_retry(r);
-        return e;
-    }
-
     const char *text = (const char *)0;
     size_t      len  = 0;
 
-    if (doc.type == JSON_OBJECT) {
-        /* The preferred case: a nested object is already a bounded span of the
-         * request, so it needs no copy and no decoding at all. */
-        text = doc.start;
-        len  = doc.len;
-    } else if (doc.type == JSON_STRING) {
-        /* Also accepted: the whole document escaped inside one JSON string. It
-         * costs a decode and it is easy to get the escaping wrong, but refusing
-         * it outright would cost a turn to explain. */
-        size_t n = 0;
-        int    rc = json_str(&doc, doc_buf, sizeof doc_buf, &n);
-        if (rc == JSON_ENOSPC)
-            return fail(r, TOOL_ENOSPC, "action=launch",
-                        "the document is longer than %d bytes", APP_DOC_MAX);
-        if (rc != JSON_OK)
+    /* file= path: load a previously saved app definition from the VFS.
+     * This is the persistence path: write the definition once with
+     * vfs_write, then launch it here and again from an agenda boot item. */
+    char file_path[VFS_PATH_MAX + 1] = {0};
+    if (f_str(in, "file", file_path, sizeof file_path) > 0) {
+        file_t *fh = vfs_open(file_path, O_RDONLY);
+        if (!fh)
             return fail(r, TOOL_EINVAL, "action=launch",
-                        "\"document\" is a string but could not be decoded");
+                        "file not found: %s", file_path);
+        int64_t n = vfs_read(fh, doc_buf, (uint64_t)APP_DOC_MAX);
+        vfs_close(fh);
+        if (n <= 0)
+            return fail(r, TOOL_EINVAL, "action=launch",
+                        "could not read file: %s", file_path);
+        doc_buf[n] = '\0';
         text = doc_buf;
-        len  = n;
-    } else {
-        int e = fail(r, TOOL_EINVAL, "action=launch",
-                     "\"document\" must be a JSON object (preferred), or a string "
-                     "containing the document's JSON - not a number, an array or "
-                     "a boolean");
-        put_retry(r);
-        return e;
+        len  = (size_t)n;
+    }
+
+    /* document= (inline): preferred when authoring; accepted as a JSON
+     * object or as an escaped JSON string. Ignored when file= was given. */
+    if (!text) {
+        if (json_get(in, "document", &doc) != JSON_OK) {
+            int e = fail(r, TOOL_EINVAL, "action=launch",
+                         "either \"document\" (the app JSON) or \"file\" (a "
+                         "path saved with vfs_write) is required");
+            put_retry(r);
+            return e;
+        }
+
+        if (doc.type == JSON_OBJECT) {
+            /* The preferred case: a nested object is already a bounded span of
+             * the request, so it needs no copy and no decoding at all. */
+            text = doc.start;
+            len  = doc.len;
+        } else if (doc.type == JSON_STRING) {
+            /* Also accepted: the whole document escaped inside one JSON string.
+             * It costs a decode and it is easy to get the escaping wrong, but
+             * refusing it outright would cost a turn to explain. */
+            size_t n = 0;
+            int    rc = json_str(&doc, doc_buf, sizeof doc_buf, &n);
+            if (rc == JSON_ENOSPC)
+                return fail(r, TOOL_ENOSPC, "action=launch",
+                            "the document is longer than %d bytes", APP_DOC_MAX);
+            if (rc != JSON_OK)
+                return fail(r, TOOL_EINVAL, "action=launch",
+                            "\"document\" is a string but could not be decoded");
+            text = doc_buf;
+            len  = n;
+        } else {
+            int e = fail(r, TOOL_EINVAL, "action=launch",
+                         "\"document\" must be a JSON object (preferred), or a "
+                         "string containing the document's JSON - not a number, "
+                         "an array or a boolean");
+            put_retry(r);
+            return e;
+        }
     }
 
     uint32_t    id = 0;
@@ -659,10 +683,15 @@ static const tool_t app_tool = {
         "keypad one tag and branch on key. Otherwise guessing is safe: a "
         "rejection names the exact fault and carries a working skeleton, so "
         "attempt two lands. action=format is the full spec. "
+        "PERSIST across reboots: vfs_write /apps/name.json <document>, then "
+        "action=launch file=/apps/name.json (instead of document=), then "
+        "agenda_save with that same tool call to re-launch at boot. "
         "Also list, state (id), close (id).",
     .input_schema =
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},"
-        "\"document\":{\"type\":\"object\"},\"id\":{\"type\":\"integer\"}},"
+        "\"document\":{\"type\":\"object\"},\"file\":{\"type\":\"string\","
+        "\"description\":\"VFS path to a saved app definition (alternative to document)\"},"
+        "\"id\":{\"type\":\"integer\"}},"
         "\"required\":[\"action\"]}",
     .flags  = TOOL_MUTATES,
     .invoke = t_app,
