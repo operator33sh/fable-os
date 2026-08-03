@@ -51,6 +51,19 @@ SECTIONS {
         __stop_tool_table = .;
     }
 
+    /* Runtime symbol table for live kernel patching (see include/ksym.h).
+     * EXPORT_SYMBOL(fn) in any .c file places a {name, addr} entry here.
+     * Only functions explicitly annotated are discoverable by the model;
+     * nothing is patchable by accident. patch_tools.c scans this table.
+     * The input section is "ksymtab" (no leading dot) so the linker
+     * supplies __start_ksymtab/__stop_ksymtab automatically. */
+    .ksymtab :
+    {
+        __start_ksymtab = .;
+        KEEP(*(ksymtab))
+        __stop_ksymtab = .;
+    }
+
     .data :
     {
         *(.data)

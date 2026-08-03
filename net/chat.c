@@ -17,6 +17,7 @@
 #include "json.h"
 #include "tool.h"
 #include "trace.h"
+#include "ksym.h"
 
 #include <stdio.h>      /* snprintf, via port/stdio.h when freestanding */
 
@@ -1121,6 +1122,9 @@ int chat_ask(const char *sentence) {
 }
 
 void chat_turn_ended(void) { in_turn = 0; }
+
+/* Export chat_ask so patch_tools can locate it at runtime. */
+EXPORT_SYMBOL(chat_ask);
 
 static int chat_ask_body(const char *sentence) {
     stat_rounds     = 0;
