@@ -296,6 +296,8 @@ static char blocks_buf[CHAT_BLOCKS_BYTES];
 static char result_buf[CHAT_TOOL_RESULT_CAP];
 static char text_buf[8192];
 
+const char *chat_last_response_text(void) { return text_buf; }
+
 static model_transport_t *transport;
 
 static unsigned max_rounds = CHAT_MAX_ROUNDS;

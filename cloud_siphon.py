@@ -95,9 +95,12 @@ typing_tlock = threading.Lock()
 
 
 def _typing_renewal(chat_id, stop_event):
-    """Keep sending 'typing' action to Telegram every 4 s until stop_event."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
-    while not stop_event.wait(4):
+    """Keep sending 'typing' action to Telegram every 4 s until stop_event.
+    Automatically stops after 120 seconds so a stuck turn never hangs forever."""
+    url     = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    elapsed = 0
+    while elapsed < 120 and not stop_event.wait(4):
+        elapsed += 4
         try:
             requests.post(url, json={"chat_id": chat_id, "action": "typing"},
                           timeout=5)

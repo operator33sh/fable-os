@@ -51,6 +51,54 @@
 #define BRIDGE_POLL  "https://10.0.2.2/v1/telegram/poll"
 #define BRIDGE_SEND  "https://10.0.2.2/v1/telegram/send"
 
+/* Forward declaration — defined in the "JSON string encoder" section below. */
+static int json_string_encode(char *buf, size_t cap, const char *s);
+
+/* ====================================================================== */
+/* per-turn sent flag                                                      */
+/* ====================================================================== */
+
+/* Set to 1 when telegram_send is called during a turn.
+ * main.c reads tg_was_sent() after chat_ask() to decide whether to
+ * auto-dispatch the model's text response to Telegram. */
+static int tg_sent;
+
+void tg_reset_sent(void) { tg_sent = 0; }
+int  tg_was_sent(void)   { return tg_sent; }
+
+/* ====================================================================== */
+/* auto-reply — called by main.c when the LLM did not call telegram_send  */
+/* ====================================================================== */
+
+/* Shared with tg_send_body below. One call at a time, always outside a turn. */
+static char tg_auto_body[FETCH_BODY_MAX + 1];
+
+int tg_auto_reply(int64_t chat_id, const char *text) {
+    if (!text || !text[0]) return -1;
+
+    char text_json[2048];
+    if (json_string_encode(text_json, sizeof text_json, text) < 0) return -1;
+
+    int blen = snprintf(tg_auto_body, sizeof tg_auto_body,
+                        "{\"chat_id\":%ld,\"text\":%s}",
+                        (long)chat_id, text_json);
+    if (blen <= 0 || (size_t)blen >= sizeof tg_auto_body) return -1;
+
+    fetch_options_t opt;
+    memset(&opt, 0, sizeof opt);
+    opt.method       = "POST";
+    opt.body         = tg_auto_body;
+    opt.body_len     = (size_t)blen;
+    opt.content_type = "application/json";
+    opt.timeout_ms   = 10000;
+
+    static char auto_rx[512];
+    fetch_result_t fr;
+    int rc = fetch(BRIDGE_SEND, sizeof BRIDGE_SEND - 1,
+                   &opt, auto_rx, sizeof auto_rx, &fr, (const char **)0);
+    return (rc == FETCH_OK && fr.http_status == 200) ? 0 : -1;
+}
+
 /* ====================================================================== */
 /* static receive buffer — never on the stack (kernel stack is 64 KiB)    */
 /* ====================================================================== */
@@ -327,6 +375,7 @@ static int t_telegram_send(const tool_call_t *call, tool_result_t *r) {
         return TOOL_OK;
     }
 
+    tg_sent = 1;
     tool_result_printf(r, "sent to chat_id %ld\n", (long)chat_id);
     return TOOL_OK;
 }

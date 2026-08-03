@@ -451,5 +451,6 @@ void chat_set_max_rounds(unsigned n);
 /* The system prompt the loop sends. Exposed so a test can assert the machine
  * tells the model what it is, rather than leaving it to guess. */
 const char *chat_system_prompt(void);
+const char *chat_last_response_text(void);  /* last model prose from this turn */
 
 #endif /* CHAT_H */

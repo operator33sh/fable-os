@@ -44,6 +44,11 @@
 #include "json.h"
 #include <stdio.h>
 
+/* Provided by tools/telegram_tools.c — no header, keep the coupling minimal. */
+extern void tg_reset_sent(void);
+extern int  tg_was_sent(void);
+extern int  tg_auto_reply(int64_t chat_id, const char *text);
+
 /* The root stack, reserved and exported by boot/boot.asm. Declared as arrays
  * because these are addresses, not objects: `extern uint8_t stack_top;` would
  * make &stack_top the only legal use and invite someone to read it. */
@@ -381,6 +386,12 @@ static char tg_rx[2048];
 /* When to next attempt a Telegram poll. 0 means "immediately on first tick". */
 static uint64_t tg_next_ms;
 
+/* chat_id of the Telegram message currently being processed, or 0 if the
+ * current sentence came from the keyboard. Set in tg_poll(), cleared after
+ * the turn completes. Also used to skip the truncation guard (which only
+ * makes sense for keyboard lines, not for our own snprintf'd messages). */
+static int64_t tg_active_chat_id;
+
 /* Poll the bridge for a pending Telegram message.
  *
  * Returns the number of bytes written into buf (> 0) when a message was
@@ -426,11 +437,13 @@ static int tg_poll(char *buf, int cap) {
     if (json_get(&root, "text", &vtext) == JSON_OK)
         json_str(&vtext, text_buf, sizeof text_buf, &n);
 
+    tg_active_chat_id = chat_id;
+
     int written = snprintf(buf, (size_t)cap,
         "Telegram message from %s (chat_id %ld): %s",
         from_name[0] ? from_name : "unknown",
         (long)chat_id, text_buf);
-    if (written <= 0 || written >= cap) return 0;
+    if (written <= 0 || written >= cap) { tg_active_chat_id = 0; return 0; }
     return written;
 }
 
@@ -682,8 +695,10 @@ void kernel_main(void) {
         if (n == 0) continue;                    /* bare Enter: ask again */
 
         /* A sentence that lost its tail is a different sentence, and this one
-         * gets executed. Refuse it loudly rather than act on half of it. */
-        if (input_line_was_truncated()) {
+         * gets executed. Refuse it loudly rather than act on half of it.
+         * Telegram sentences are built by snprintf() in tg_poll(), not by the
+         * keyboard driver, so the truncation flag does not apply to them. */
+        if (!tg_active_chat_id && input_line_was_truncated()) {
             kprintf("[input truncated at %d characters - not sent. A cut-off "
                     "sentence could mean something you did not say; "
                     "say it again, shorter.]\n", n);
@@ -716,6 +731,20 @@ void kernel_main(void) {
             kputs("[net recovered - the model is reachable again]\n");
         }
 
+        if (tg_active_chat_id) tg_reset_sent();
         chat_ask(line);
+
+        /* AUTO-DISPATCH: if the sentence came from Telegram and the LLM did
+         * not call telegram_send during the turn, send its text response
+         * ourselves. This makes Telegram work reliably even when the model
+         * produces prose instead of a tool call. */
+        if (tg_active_chat_id) {
+            if (!tg_was_sent()) {
+                const char *reply = chat_last_response_text();
+                if (reply && reply[0])
+                    tg_auto_reply(tg_active_chat_id, reply);
+            }
+            tg_active_chat_id = 0;
+        }
     }
 }
