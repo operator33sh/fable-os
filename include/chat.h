@@ -298,7 +298,7 @@
  * compiler family was trimmed by 557 bytes on the way in - a verbose
  * per-property input_schema, which said what its description already said - to
  * leave that 1035 rather than 478. */
-#define CHAT_REGISTRY_BYTES    57295
+#define CHAT_REGISTRY_BYTES    60055
 
 /* The user turn that carries a round's tool_result blocks plus the kernel's
  * budget note.
