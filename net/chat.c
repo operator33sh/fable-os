@@ -1128,6 +1128,10 @@ static int chat_ask_body(const char *sentence) {
     /* Per-turn stat resets and epoch bump are performed by ACT_CHAT_TURN_BEGIN
      * dispatched in chat_ask() before this function is called. */
 
+    /* Clear the text buffer so a failed or tool-only turn never leaks a
+     * stale response from the previous turn to Telegram's auto-reply path. */
+    text_buf[0] = '\0';
+
     if (!g_state.chat.transport) {
         kputs("[no link to the model - this machine cannot act]\n");
         return CHAT_ETRANSPORT;

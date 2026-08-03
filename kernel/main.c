@@ -740,20 +740,30 @@ void kernel_main(void) {
             kputs("[net recovered - the model is reachable again]\n");
         }
 
-        chat_ask(line);
+        int ask_rc = chat_ask(line);
 
         /* AUTO-DISPATCH: if the sentence came from Telegram and the LLM did
          * not call telegram_send during the turn, send its text response
          * ourselves. This makes Telegram work reliably even when the model
          * produces prose instead of a tool call.
          *
+         * When chat_ask() itself failed (network, ENOSPC, etc.) text_buf is
+         * empty (cleared at turn start in chat.c) so we send a brief error
+         * note instead — otherwise the Telegram user gets silence.
+         *
          * ACT_TG_TURN_COMPLETE resets both active_chat_id and sent, so the
          * next telegram message starts clean without a separate reset step. */
         if (g_state.telegram.active_chat_id) {
             if (!g_state.telegram.sent) {
                 const char *reply = chat_last_response_text();
-                if (reply && reply[0])
-                    tg_auto_reply(g_state.telegram.active_chat_id, reply);
+                if (!reply || !reply[0]) {
+                    if (ask_rc == CHAT_ENOSPC)
+                        reply = "The conversation grew too long; I had to forget "
+                                "some history. Please repeat your last message.";
+                    else
+                        reply = "Something went wrong on my end. Please try again.";
+                }
+                tg_auto_reply(g_state.telegram.active_chat_id, reply);
             }
             state_dispatch(&(action_t){.type = ACT_TG_TURN_COMPLETE});
         }
