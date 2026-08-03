@@ -2002,3 +2002,45 @@ int capability_invoke(const char *name, const uint64_t *args, int nargs,
     }
     return rc;
 }
+
+int capability_invoke_text(const char *name,
+                           const char * const *texts, int ntexts,
+                           cap_result_t *out) {
+    if (!out) return CAP_EINVAL;
+    if (ntexts < 0 || ntexts > CAP_TEXT_ARGS_MAX) {
+        memset(out, 0, sizeof *out);
+        out->rc = CAP_EINVAL;
+        say(out->msg, sizeof out->msg,
+            "%d text arguments; the maximum is %d", ntexts, CAP_TEXT_ARGS_MAX);
+        return CAP_EINVAL;
+    }
+    /* Write each text arg to <data_root>/_cap_arg{n} before the call.
+     * The capability reads them with fs.read; the corresponding numeric
+     * argument is the slot index so the program knows which file to open.
+     * This is the file-based text-passing shape: observable, debuggable,
+     * and free of any VM change. See capability.h's FUTURE EXTENSION POINTS
+     * for the per-run scratch window that would be the cleaner long-term answer. */
+    const char *root = capability_data_root();
+    uint64_t    args[CAP_TEXT_ARGS_MAX];
+    char        path[VFS_PATH_MAX + 1];
+    for (int i = 0; i < ntexts; i++) {
+        const char *t   = (texts && texts[i]) ? texts[i] : "";
+        size_t      len = strlen(t);
+        int n = snprintf(path, sizeof path, "%s/_cap_arg%d", root, i);
+        if (n < 0 || (size_t)n >= sizeof path) {
+            memset(out, 0, sizeof *out);
+            out->rc = CAP_EINVAL;
+            say(out->msg, sizeof out->msg, "data root path too long");
+            return CAP_EINVAL;
+        }
+        if (file_write_all(path, t, len) != CAP_OK) {
+            memset(out, 0, sizeof *out);
+            out->rc = CAP_EIO;
+            say(out->msg, sizeof out->msg,
+                "could not write text argument %d to %s", i, path);
+            return CAP_EIO;
+        }
+        args[i] = (uint64_t)i;
+    }
+    return capability_invoke(name, args, ntexts, out);
+}

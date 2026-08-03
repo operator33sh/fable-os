@@ -181,6 +181,11 @@ static int t_save(const tool_call_t *call, tool_result_t *r) {
 /* capability_call                                                        */
 /* ====================================================================== */
 
+/* Maximum number of bytes per text argument. Kept deliberately small: eight
+ * args of this size fit comfortably on the kernel stack and are wide enough
+ * for any path or short instruction string the model would plausibly pass. */
+#define CT_TEXT_ARG_MAX 512
+
 static int t_call(const tool_call_t *call, tool_result_t *r) {
     json_value_t in, args, e;
     char         name[CAP_NAME_MAX];
@@ -195,7 +200,18 @@ static int t_call(const tool_call_t *call, tool_result_t *r) {
     if (want_name(&in, name, sizeof name, why, sizeof why) != 0)
         return fail(r, TOOL_EINVAL, "cap.call", "", why);
 
-    if (json_get(&in, "args", &args) == JSON_OK) {
+    int has_args = 0, has_text_args = 0;
+    if (json_get(&in, "args", &args) == JSON_OK && args.type != JSON_NULL)
+        has_args = 1;
+    json_value_t text_args;
+    if (json_get(&in, "text_args", &text_args) == JSON_OK &&
+        text_args.type != JSON_NULL)
+        has_text_args = 1;
+    if (has_args && has_text_args)
+        return fail(r, TOOL_EINVAL, "cap.call", name,
+                    "provide \"args\" OR \"text_args\", not both");
+
+    if (has_args) {
         if (args.type != JSON_ARRAY)
             return fail(r, TOOL_EINVAL, "cap.call", name,
                         "\"args\" must be an array of whole numbers");
@@ -210,8 +226,8 @@ static int t_call(const tool_call_t *call, tool_result_t *r) {
             if (json_at(&args, i, &e) != JSON_OK || json_int(&e, &v) != JSON_OK) {
                 snprintf(why, sizeof why,
                          "argument %d is not a whole number. Every capability "
-                         "argument is a number; pass text through a file under "
-                         "the data root instead", (int)i + 1);
+                         "argument is a number; pass text via \"text_args\" "
+                         "instead", (int)i + 1);
                 return fail(r, TOOL_EINVAL, "cap.call", name, why);
             }
             /* Negative is accepted and reinterpreted, because every value in
@@ -222,7 +238,53 @@ static int t_call(const tool_call_t *call, tool_result_t *r) {
     }
 
     cap_result_t res;
-    int rc = capability_invoke(name, a, nargs, &res);
+    int rc;
+
+    if (has_text_args) {
+        if (text_args.type != JSON_ARRAY)
+            return fail(r, TOOL_EINVAL, "cap.call", name,
+                        "\"text_args\" must be an array of strings");
+        size_t n = json_count(&text_args);
+        if (n > CAP_TEXT_ARGS_MAX) {
+            snprintf(why, sizeof why, "%d text arguments; the maximum is %d",
+                     (int)n, CAP_TEXT_ARGS_MAX);
+            return fail(r, TOOL_EINVAL, "cap.call", name, why);
+        }
+        /* Extract each string into local storage, then call the text-arg path
+         * which writes them to the data root before invoking. */
+        char         text_bufs[CAP_TEXT_ARGS_MAX][CT_TEXT_ARG_MAX];
+        const char  *texts[CAP_TEXT_ARGS_MAX];
+        int ntexts = (int)n;
+        for (int i = 0; i < ntexts; i++) {
+            if (json_at(&text_args, (size_t)i, &e) != JSON_OK) {
+                snprintf(why, sizeof why, "text_args[%d] could not be read", i);
+                return fail(r, TOOL_EINVAL, "cap.call", name, why);
+            }
+            size_t slen = 0;
+            if (e.type == JSON_NULL) {
+                text_bufs[i][0] = '\0';
+            } else if (e.type == JSON_STRING) {
+                int sr = json_str(&e, text_bufs[i], CT_TEXT_ARG_MAX, &slen);
+                if (sr == JSON_ENOSPC) {
+                    snprintf(why, sizeof why,
+                             "text_args[%d] exceeds the %d-byte limit", i,
+                             CT_TEXT_ARG_MAX - 1);
+                    return fail(r, TOOL_EINVAL, "cap.call", name, why);
+                }
+                if (sr != JSON_OK) {
+                    snprintf(why, sizeof why, "text_args[%d] is not a string", i);
+                    return fail(r, TOOL_EINVAL, "cap.call", name, why);
+                }
+            } else {
+                snprintf(why, sizeof why, "text_args[%d] is not a string", i);
+                return fail(r, TOOL_EINVAL, "cap.call", name, why);
+            }
+            texts[i] = text_bufs[i];
+        }
+        rc = capability_invoke_text(name, texts, ntexts, &res);
+    } else {
+        rc = capability_invoke(name, a, nargs, &res);
+    }
 
     if (rc != CAP_OK) {
         r->is_error = 1;
@@ -462,7 +524,12 @@ static const tool_t capability_call_tool = {
         "\"name\":{\"type\":\"string\"},"
         "\"args\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},"
         "\"description\":\"exactly as many whole numbers as the capability "
-        "declares, in order\"}},"
+        "declares, in order; mutually exclusive with text_args\"},"
+        "\"text_args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
+        "\"description\":\"text arguments; each string is written to "
+        "<data_root>/_cap_arg{n} before the call so the capability can read "
+        "it with fs.read; the slot index n is passed as its numeric argument; "
+        "mutually exclusive with args\"}},"
         "\"required\":[\"name\"]}",
     .flags  = TOOL_MUTATES,
     .invoke = t_call,

@@ -268,6 +268,58 @@ static long cc_rt_file_size(const char *name) {
     return (long)st.size;
 }
 
+/* ---- string comparison and copy ---- */
+
+/* Safety-bounded strcmp: stops at CC_RT_SPAN_MAX and returns 0 for a string
+ * with no terminator rather than reading until it faults.  Never calls the
+ * libc strcmp, which has no bound. */
+static long cc_rt_strcmp(const char *a, const char *b) {
+    g_calls++;
+    long na = span_of(a, CC_RT_SPAN_MAX);
+    long nb = span_of(b, CC_RT_SPAN_MAX);
+    if (na < 0 || nb < 0) { g_refused++; return 0; }
+    for (long i = 0; ; i++) {
+        unsigned char ca = (i <= na) ? (unsigned char)a[i] : 0;
+        unsigned char cb = (i <= nb) ? (unsigned char)b[i] : 0;
+        if (ca != cb) return (long)ca - (long)cb;
+        if (!ca)      return 0;
+    }
+}
+
+static long cc_rt_strncmp(const char *a, const char *b, long n) {
+    g_calls++;
+    if (!a || !b || !span_ok(n)) { g_refused++; return 0; }
+    return (long)strncmp(a, b, (size_t)n);
+}
+
+static void *cc_rt_strncpy(char *d, const char *s, long n) {
+    g_calls++;
+    if (!d || !s || !span_ok(n)) { g_refused++; return d; }
+    strncpy(d, s, (size_t)n);
+    return d;
+}
+
+/* List files in the data root, one name per line, NUL-terminated.
+ * Returns bytes written (not counting NUL), or -1 on error or bad args. */
+static long cc_rt_file_list(char *buf, long max) {
+    g_calls++;
+    if (!buf || !span_ok(max)) { g_refused++; return -1; }
+    long pos = 0;
+    uint32_t idx = 0;
+    char name[CC_RT_NAME_MAX + 1];
+    const char *root = cc_data_root();
+    while (vfs_readdir(root, idx++, name, sizeof name) == VFS_OK) {
+        long n = span_of(name, sizeof name);
+        if (n < 0) break;
+        if (pos + n + 1 >= max) break;       /* +1 for '\n'; leave room for NUL */
+        memcpy(buf + pos, name, (size_t)n);
+        pos += n;
+        buf[pos++] = '\n';
+    }
+    if (max > 0) buf[pos < max ? pos : max - 1] = '\0';
+    return pos;
+}
+
 /* ===================================================================== */
 /* the table                                                             */
 /* ===================================================================== */
@@ -330,6 +382,20 @@ static const entry_t g_table[] = {
     { "file_size", "lp", (rawfn_t)cc_rt_file_size,
       "long file_size(char *name)",
       "bytes, or -1 if there is no such file" },
+    { "strcmp", "lpp", (rawfn_t)cc_rt_strcmp,
+      "long strcmp(char *a, char *b)",
+      "compare two NUL-terminated strings; stops at 65536 bytes and returns 0 for "
+      "an unterminated string rather than reading until it faults" },
+    { "strncmp", "lppl", (rawfn_t)cc_rt_strncmp,
+      "long strncmp(char *a, char *b, long n)",
+      "bounded compare: same length cap as memcmp" },
+    { "strncpy", "Pppl", (rawfn_t)cc_rt_strncpy,
+      "void *strncpy(void *d, char *s, long n)",
+      "bounded copy into d; n above 65536 is refused" },
+    { "file_list", "lpl", (rawfn_t)cc_rt_file_list,
+      "long file_list(char *buf, long max)",
+      "list files in the data root, one name per line, NUL-terminated; "
+      "returns bytes written or -1; use with file_read to iterate" },
 };
 
 #define NENTRY ((int)(sizeof g_table / sizeof g_table[0]))

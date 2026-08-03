@@ -109,6 +109,11 @@
  *     fs.size     The destination/source spans are checked like any other.
  *     audio.tone  frequency and duration range-checked here, not in audio.c.
  *     time.ms     no arguments, no state, reads the millisecond clock.
+ *     net.fetch   url span (off,len) + dst span (off,cap). Fetches the URL
+ *                 and writes the response body to scratch at dst_off,
+ *                 NUL-terminated. Returns the HTTP status code (200, 404, …)
+ *                 or a negative FETCH_E* transport error code. Arity 4:
+ *                 url_off, url_len, dst_off, dst_cap.
  *
  *   THE HONEST PART, again. fs.write is a real hole: a program that may write
  *   files can rewrite something a later turn will read and believe. fs_root is
@@ -368,12 +373,10 @@
  *     which dvm_run() now ENFORCES (DVM_TRAP_REENTRY) rather than assuming — it
  *     was assumed for a while, and a syscall serviced by a second program was
  *     quietly falsifying it.
- *   - A NETWORK syscall is the obvious next hole and is deliberately absent:
- *     net.h publishes net_ask() (the model transport) and nothing that fetches
- *     a URL synchronously, and inventing one belongs in net/, not here. When it
- *     exists it is one hook in dvm_sys_t, one dvm_sys_nr_t, one arity entry and
- *     one line of ISA text — the shape is already cut for it. The strings the
- *     `m` family builds are the half of that job this file could do alone.
+ *   - A network syscall has been added as DVM_SYS_NET_FETCH: one hook in
+ *     dvm_sys_t (net_fetch), one entry in dvm_sys_nr_t, arity 4.  The kernel
+ *     backend calls fetch() from net/fetch.c; host test builds leave the hook
+ *     NULL, which the VM turns into DVM_TRAP_NOIO as with any absent service.
  *   - Scratch memory is one flat arena because one program runs at a time. If
  *     that ever stops being true it wants a per-run window (base+size) rather
  *     than a second array, so that "offset" keeps meaning the same thing.
@@ -559,6 +562,12 @@ typedef enum {
     DVM_SYS_FS_SIZE,        /* (poff,plen)           -> file size in bytes    */
     DVM_SYS_AUDIO_TONE,     /* (hz,ms)               -> 0. Ranges checked.    */
     DVM_SYS_TIME_MS,        /* ()                    -> milliseconds since boot */
+    DVM_SYS_NET_FETCH,      /* (url_off,url_len,dst_off,dst_cap) -> http_status.
+                             * Fetches `url` (a span in scratch) and writes the
+                             * response body into scratch at dst_off, NUL-term'd.
+                             * Returns the HTTP status code (200, 404, …) on
+                             * success, or a negative FETCH_E* code on transport
+                             * error. Arity 4. */
     DVM_SYS__COUNT
 } dvm_sys_nr_t;
 
@@ -636,6 +645,10 @@ int dvm_assemble(const char *src, size_t len, dvm_program_t *out,
  * Returns DVM_OK or DVM_TRAP_BADOP/DVM_TRAP_PC/DVM_TRAP_RANGE; when it fails and
  * `err` is non-NULL, err->line is the offending source line. */
 dvm_status_t dvm_program_validate(const dvm_program_t *p, dvm_asm_err_t *err);
+
+/* Find a label by name in an assembled program.
+ * Returns the PC (instruction index) or -1 if not found. */
+int dvm_program_find_label(const dvm_program_t *p, const char *name);
 
 /* Render instruction `pc` back to assembler text (no trailing newline).
  * Returns the number of bytes written, 0 if pc is out of range. */
@@ -825,6 +838,12 @@ typedef struct dvm_sys {
     int64_t (*audio_tone)(void *ctx, uint32_t hz, uint32_t ms,
                           char *err, size_t errcap);
     int64_t (*time_ms   )(void *ctx, char *err, size_t errcap);
+    /* Fetch `url` (NUL-terminated) and write the response body into `dst`
+     * (a kernel pointer into the scratch arena, already bounds-checked by
+     * the VM). Returns the HTTP status code, or a negative FETCH_E* code.
+     * NULL means "no network backend": the syscall traps with DVM_TRAP_NOIO. */
+    int64_t (*net_fetch )(void *ctx, const char *url, void *dst, size_t cap,
+                          char *err, size_t errcap);
 } dvm_sys_t;
 
 typedef struct dvm_io {
@@ -895,5 +914,13 @@ typedef struct {
 dvm_status_t dvm_run(const dvm_program_t *p, const dvm_policy_t *pol,
                      const dvm_io_t *io, const uint64_t *args, int nargs,
                      dvm_result_t *res);
+
+/* Like dvm_run() but starts execution at `start_pc` instead of instruction 0.
+ * start_pc must be a valid instruction index (< p->ninsn); if not, the run is
+ * refused immediately with DVM_TRAP_BADOP before any side effect.
+ * dvm_run() is a thin wrapper that calls this with start_pc = 0. */
+dvm_status_t dvm_run_at(const dvm_program_t *p, const dvm_policy_t *pol,
+                         const dvm_io_t *io, const uint64_t *args, int nargs,
+                         uint32_t start_pc, dvm_result_t *res);
 
 #endif /* DVM_H */
