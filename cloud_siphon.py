@@ -20,8 +20,8 @@ KEY_FILE = "/home/wouter/Development/fable-os/key.pem"
 # Set TELEGRAM_BOT_TOKEN to your bot token from @BotFather.
 # Leave TELEGRAM_ALLOWED_CHAT_IDS empty to accept messages from any chat,
 # or list specific chat IDs to restrict access.
-TELEGRAM_BOT_TOKEN = ""          # e.g. "123456789:ABC-DEF..."
-TELEGRAM_ALLOWED_CHAT_IDS = []   # e.g. [123456789, -1001234567890]
+TELEGRAM_BOT_TOKEN = "8712662367:AAE5JAi3JH12Bw2aB9ETTgeUxFo-zTq6jUE"          # e.g. "123456789:ABC-DEF..."
+TELEGRAM_ALLOWED_CHAT_IDS = [8732428728]   # e.g. [123456789, -1001234567890]
 # ---------------------
 
 # ======================================================================
@@ -83,6 +83,53 @@ def telegram_poller():
         except Exception as e:
             print(f"[Siphon/Telegram] Poller error: {e}")
             time.sleep(5)
+
+
+# ======================================================================
+# Typing indicator — renewed every 4 s while the kernel processes a message
+# ======================================================================
+
+# Maps chat_id (int) -> threading.Event. Set the event to stop renewal.
+typing_stop  = {}
+typing_tlock = threading.Lock()
+
+
+def _typing_renewal(chat_id, stop_event):
+    """Keep sending 'typing' action to Telegram every 4 s until stop_event."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    while not stop_event.wait(4):
+        try:
+            requests.post(url, json={"chat_id": chat_id, "action": "typing"},
+                          timeout=5)
+        except Exception:
+            pass
+
+
+def start_typing(chat_id):
+    """Send an immediate typing action and start the renewal thread."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    stop_typing(chat_id)   # cancel any previous renewal for this chat
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "action": "typing"},
+                      timeout=5)
+    except Exception:
+        pass
+    ev = threading.Event()
+    with typing_tlock:
+        typing_stop[chat_id] = ev
+    t = threading.Thread(target=_typing_renewal, args=(chat_id, ev),
+                         name=f"typing-{chat_id}", daemon=True)
+    t.start()
+
+
+def stop_typing(chat_id):
+    """Signal the typing renewal thread for this chat to stop."""
+    with typing_tlock:
+        ev = typing_stop.pop(chat_id, None)
+    if ev:
+        ev.set()
 
 
 def telegram_send_message(chat_id, text):
@@ -265,6 +312,7 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
                         "text":    msg["text"],
                     }
                     print(f"[Siphon/poll] Delivering message from chat {msg['chat_id']}")
+                    start_typing(msg["chat_id"])
                 else:
                     payload = {"pending": False}
 
@@ -299,6 +347,7 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b'{"error":"chat_id and text required"}')
                     return
 
+                stop_typing(int(chat_id))
                 ok, err = telegram_send_message(int(chat_id), text)
                 if ok:
                     body = json.dumps({"ok": True}).encode("utf-8")

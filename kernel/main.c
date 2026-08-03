@@ -40,6 +40,9 @@
 #include "agenda.h"
 #include "fault.h"
 #include "faultchat.h"
+#include "fetch.h"
+#include "json.h"
+#include <stdio.h>
 
 /* The root stack, reserved and exported by boot/boot.asm. Declared as arrays
  * because these are addresses, not objects: `extern uint8_t stack_top;` would
@@ -364,6 +367,73 @@ static void idle_work(void) {
     agenda_tick(millis());
 }
 
+/* ======================================================================= */
+/* Telegram inbox — polled every 2 s in the idle loop                      */
+/* ======================================================================= */
+
+/* The bridge endpoint for Telegram polling (CloudSiphon on the QEMU host). */
+#define TG_POLL_URL         "https://10.0.2.2/v1/telegram/poll"
+#define TG_POLL_INTERVAL_MS 2000u
+
+/* Static receive buffer for the poll response. Never on the stack. */
+static char tg_rx[2048];
+
+/* When to next attempt a Telegram poll. 0 means "immediately on first tick". */
+static uint64_t tg_next_ms;
+
+/* Poll the bridge for a pending Telegram message.
+ *
+ * Returns the number of bytes written into buf (> 0) when a message was
+ * found, or 0 when the queue is empty or the network is down. On success,
+ * buf contains a sentence of the form:
+ *
+ *   "Telegram message from Alice (chat_id 12345): hello there"
+ *
+ * which the main loop passes to chat_ask() verbatim. The LLM sees it as
+ * operator input and knows from the system prompt to reply via telegram_send.
+ *
+ * SAFETY: only called from wait_for_sentence(), which only runs between
+ * turns (in_turn == 0 and no other fiber holds the network). */
+static int tg_poll(char *buf, int cap) {
+    fetch_result_t fr;
+    int rc = fetch(TG_POLL_URL, sizeof TG_POLL_URL - 1,
+                   (const fetch_options_t *)0,
+                   tg_rx, sizeof tg_rx, &fr, (const char **)0);
+    if (rc != FETCH_OK || fr.http_status != 200 || !fr.body || !fr.body_len)
+        return 0;
+
+    json_value_t root;
+    if (json_parse(fr.body, fr.body_len, &root) != JSON_OK ||
+        root.type != JSON_OBJECT)
+        return 0;
+
+    json_value_t vpending;
+    if (json_get(&root, "pending", &vpending) != JSON_OK) return 0;
+    int pending = 0;
+    json_bool(&vpending, &pending);
+    if (!pending) return 0;
+
+    json_value_t vchat, vfrom, vtext;
+    int64_t chat_id = 0;
+    char from_name[64]  = "";
+    char text_buf[512]  = "";
+    size_t n = 0;
+
+    if (json_get(&root, "chat_id", &vchat) == JSON_OK)
+        json_int(&vchat, &chat_id);
+    if (json_get(&root, "from", &vfrom) == JSON_OK)
+        json_str(&vfrom, from_name, sizeof from_name, &n);
+    if (json_get(&root, "text", &vtext) == JSON_OK)
+        json_str(&vtext, text_buf, sizeof text_buf, &n);
+
+    int written = snprintf(buf, (size_t)cap,
+        "Telegram message from %s (chat_id %ld): %s",
+        from_name[0] ? from_name : "unknown",
+        (long)chat_id, text_buf);
+    if (written <= 0 || written >= cap) return 0;
+    return written;
+}
+
 static int wait_for_sentence(char *buf, int cap) {
     if (input_source_count() == 0) return INPUT_NONE;
     for (;;) {
@@ -371,6 +441,21 @@ static int wait_for_sentence(char *buf, int cap) {
         else          ui_inline();
 
         idle_work();
+
+        /* TELEGRAM INBOX CHECK — every TG_POLL_INTERVAL_MS while idle.
+         *
+         * This is the right place: we are structurally between two turns
+         * (idle_work() just proved in_turn == 0), the network is not in use by
+         * any other fiber, and the result is returned as a sentence exactly like
+         * keyboard input — the main loop never learns the difference. */
+        {
+            uint64_t now = millis();
+            if (now >= tg_next_ms) {
+                tg_next_ms = now + TG_POLL_INTERVAL_MS;
+                int tg_n = tg_poll(buf, cap);
+                if (tg_n > 0) return tg_n;
+            }
+        }
 
         /* THIS is where a capability call an app queued gets performed, and this
          * loop is the only place in the kernel that may do it: the machine is

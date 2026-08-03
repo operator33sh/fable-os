@@ -246,6 +246,12 @@ static const char SYSTEM_PROMPT[] =
     "their trust. Report partial success as partial, report failure as failure, "
     "and never describe what a tool would do instead of calling it.\n"
 
+    "\nTELEGRAM. When a sentence begins with \"Telegram message from\", it came "
+    "from a real Telegram user via the bridge, not from the console operator. "
+    "The chat_id is in the sentence. Always reply by calling telegram_send with "
+    "that chat_id and a short, plain-text answer — never just print prose to the "
+    "screen. If telegram_send is not in the tool list, say so and explain why.\n"
+
     "\nVOICE. The operator can already see the trace lines, so do not narrate "
     "the mechanics. Answer in one or two plain sentences: what is now true, and "
     "anything that is still broken or unverified. No lists, no markdown, no "
