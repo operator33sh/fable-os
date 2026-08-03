@@ -155,7 +155,7 @@
 #if defined(FABLEOS_VERIFY_CERTS) && defined(FABLEOS_TLS_HOST)
 #define API_HOST   FABLEOS_TLS_HOST
 #else
-#define API_HOST   "api.anthropic.com"
+#define API_HOST   "10.0.2.2"
 #endif
 
 /* The name the certificate must carry. Sent as SNI in every build; under

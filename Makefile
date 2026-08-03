@@ -366,7 +366,7 @@ kernel.bin: kernel.elf
 # environment variable beats `?=`. Anyone with XQuartz running, or on `ssh -X`,
 # silently got `-display :0` and a QEMU that refused to start, with a Makefile
 # that looked correct.
-QEMU_DISPLAY ?= cocoa,zoom-to-fit=on
+QEMU_DISPLAY ?= gtk
 
 # ...but QEMU opens that window at the raw framebuffer size, which is unreadably
 # small on a Retina display, and -display cocoa has no option for the initial
