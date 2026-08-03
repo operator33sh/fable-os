@@ -145,7 +145,7 @@ TOOL_SRCS := $(wildcard tools/*.c)
 KERNEL_SRCS := kernel/main.c kernel/drivers.c $(TOOL_SRCS) \
                arch/x86_64/idt.c arch/x86_64/fault.c \
                core/kobject.c core/tool.c core/audio.c core/fiber.c \
-               core/capability.c core/agenda.c \
+               core/capability.c core/agenda.c core/state.c \
                mm/heap.c device/device.c \
                fs/vfs/vfs.c fs/native/ramfs.c fs/fs.c \
                fs/fat/fat_vol.c fs/fat/fat_dir.c fs/fat/fat.c \
@@ -692,7 +692,8 @@ TESTSRC_test_app := $(APPSRC) tools/app_tools.c \
                     tools/gui_tools.c gui/wm.c gui/widgets.c gui/gui_demo.c \
                     lib/fb.c lib/font.c lib/font_spleen8x16.c \
                     drivers/input/mouse.c core/tool.c lib/trace.c \
-                    net/json.c net/model.c net/model_mock.c net/chat.c
+                    net/json.c net/model.c net/model_mock.c net/chat.c \
+                    core/state.c
 # test_app_format covers the format additions (tick, the time snapshot, rand, at,
 # round) and the shipped examples. No tools and no chat: it drives app_launch(),
 # app_tick() and gui_click_widget() directly, so it needs only the runtime and the
@@ -757,7 +758,7 @@ TESTSRC_test_dvm_ac97 := vm/dvm.c lib/trace.c
 TESTSRC_test_dvm_tools := vm/dvm.c lib/trace.c core/tool.c core/kobject.c \
                           device/device.c mm/heap.c net/json.c net/model.c \
                           net/model_mock.c net/chat.c core/audio.c \
-                          fs/vfs/vfs.c fs/native/ramfs.c
+                          fs/vfs/vfs.c fs/native/ramfs.c core/state.c
 # test_audio links the REAL driver VM, so the play path a model-authored driver
 # takes is exercised end to end against a synthetic device on the host: the suite
 # assembles a play program, registers it as the sink, plays a tone, and then reads
@@ -799,7 +800,7 @@ TESTSRC_test_fault := arch/x86_64/fault.c tools/fault_tools.c core/tool.c \
                       lib/trace.c net/json.c
 TESTSRC_test_fault_diagnose := net/faultchat.c arch/x86_64/fault.c \
                       tools/fault_tools.c core/tool.c lib/trace.c net/json.c \
-                      net/model.c net/model_mock.c
+                      net/model.c net/model_mock.c core/state.c
 # test_repair drives the whole self-repair loop: a fault, an escape to a guard,
 # a diagnosis against the mock transport, a validated code patch, a rollback, and
 # an agenda item that survives all of it. It therefore links the fault module,
@@ -811,15 +812,15 @@ TESTSRC_test_repair := arch/x86_64/fault.c net/faultchat.c core/agenda.c \
                       tools/fault_tools.c tools/agenda_tools.c \
                       core/tool.c core/kobject.c lib/trace.c net/json.c \
                       net/model.c net/model_mock.c mm/heap.c \
-                      fs/vfs/vfs.c fs/native/ramfs.c
+                      fs/vfs/vfs.c fs/native/ramfs.c core/state.c
 TESTSRC_test_chat := net/json.c net/model.c net/model_mock.c net/chat.c \
-                     core/tool.c lib/trace.c
+                     core/tool.c lib/trace.c core/state.c
 # test_agency drives whole multi-step jobs through the real loop against the real
 # VFS and agent tool families, so it links both of them plus the filesystem.
 TESTSRC_test_agency := net/json.c net/model.c net/model_mock.c net/chat.c \
                      core/tool.c core/kobject.c lib/trace.c mm/heap.c \
                      fs/vfs/vfs.c fs/native/ramfs.c \
-                     tools/vfs_tools.c tools/agent_tools.c
+                     tools/vfs_tools.c tools/agent_tools.c core/state.c
 TESTSRC_test_sse := net/json.c net/model.c net/sse.c
 # net/fetch.c is the whole network path minus the sockets: the suite supplies its
 # own fetch_backend_t, so no lwIP and no mbedTLS are linked. The VFS is here

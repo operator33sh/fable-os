@@ -38,6 +38,7 @@
  *                             bridge (cloud_siphon.py TELEGRAM_ALLOWED_CHAT_IDS)
  */
 
+#include "state.h"
 #include "tool.h"
 #include "json.h"
 #include "fetch.h"
@@ -54,17 +55,9 @@
 /* Forward declaration — defined in the "JSON string encoder" section below. */
 static int json_string_encode(char *buf, size_t cap, const char *s);
 
-/* ====================================================================== */
-/* per-turn sent flag                                                      */
-/* ====================================================================== */
-
-/* Set to 1 when telegram_send is called during a turn.
- * main.c reads tg_was_sent() after chat_ask() to decide whether to
- * auto-dispatch the model's text response to Telegram. */
-static int tg_sent;
-
-void tg_reset_sent(void) { tg_sent = 0; }
-int  tg_was_sent(void)   { return tg_sent; }
+/* Per-turn sent flag lives in g_state.telegram.sent (state.h).
+ * main.c reads g_state.telegram.sent directly after chat_ask().
+ * ACT_TG_TURN_COMPLETE (dispatched by main.c) resets it. */
 
 /* ====================================================================== */
 /* auto-reply — called by main.c when the LLM did not call telegram_send  */
@@ -375,7 +368,7 @@ static int t_telegram_send(const tool_call_t *call, tool_result_t *r) {
         return TOOL_OK;
     }
 
-    tg_sent = 1;
+    state_dispatch(&(action_t){.type = ACT_TG_SENT});
     tool_result_printf(r, "sent to chat_id %ld\n", (long)chat_id);
     return TOOL_OK;
 }

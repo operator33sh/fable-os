@@ -32,15 +32,15 @@
  *   sees new bytes as soon as they are written, so no serialising instruction
  *   is needed on a single-core cooperative kernel.
  *
- *   The rollback store is a static array of PATCH_MAX_SLOTS slots, each
- *   holding up to PATCH_MAX_BYTES original bytes. A function can hold at most
- *   one live patch; applying a second patch to the same function is an error
- *   (call patch_rollback first). There is no nesting.
+ *   Rollback state lives in g_state.patch (core/state.c). patch_slot_t and
+ *   the STATE_PATCH_* size constants are defined in include/state.h.
+ *   Transitions go through state_dispatch(ACT_PATCH_APPLY/ROLLBACK): the
+ *   .text write happens first, the state update follows only on success.
  *
  * SAFETY CONSTRAINTS (enforced here, not in the handler)
  *   1. Target address must be in [__text_start, __text_end).
  *   2. Target address + patch length must not exceed __text_end.
- *   3. Patch length must be 1..PATCH_MAX_BYTES.
+ *   3. Patch length must be 1..STATE_PATCH_MAX_BYTES.
  *   4. The function must be exported (in .ksymtab).
  *   5. No double-patch without an intervening rollback.
  *
@@ -53,6 +53,7 @@
  *   the next turn.
  *
  * DEPENDENCIES
+ *   state.h (patch_slot_t, STATE_PATCH_*, g_state, state_dispatch),
  *   ksym.h, tool.h, json.h, <string.h>. No fetch, no lwIP, no kernel.h.
  *
  * FUTURE EXTENSION POINTS
@@ -61,6 +62,7 @@
  *                       mutable .ksymtab, not a read-only section)
  */
 
+#include "state.h"
 #include "ksym.h"
 #include "tool.h"
 #include "json.h"
@@ -75,36 +77,23 @@ extern char __text_start[];
 extern char __text_end[];
 
 /* ====================================================================== */
-/* Rollback store                                                          */
+/* Rollback store helpers — read from g_state.patch                       */
 /* ====================================================================== */
 
-#define PATCH_MAX_BYTES  64   /* maximum bytes per live patch        */
-#define PATCH_MAX_SLOTS   8   /* maximum concurrently active patches */
-#define PATCH_NAME_MAX   64   /* max length of an exported name      */
-
-typedef struct {
-    char      name[PATCH_NAME_MAX];   /* exported symbol name          */
-    uintptr_t addr;                   /* address that was patched      */
-    uint8_t   orig[PATCH_MAX_BYTES];  /* original bytes before patch   */
-    uint8_t   patch[PATCH_MAX_BYTES]; /* bytes that were written       */
-    size_t    len;                    /* byte count saved/written      */
-    int       active;                 /* 1 = slot in use, 0 = free     */
-} patch_slot_t;
-
-static patch_slot_t rollback_store[PATCH_MAX_SLOTS];
-
 static patch_slot_t *slot_by_name(const char *name) {
-    for (int i = 0; i < PATCH_MAX_SLOTS; i++) {
-        if (rollback_store[i].active &&
-            strncmp(rollback_store[i].name, name, PATCH_NAME_MAX) == 0)
-            return &rollback_store[i];
+    for (int i = 0; i < STATE_PATCH_MAX_SLOTS; i++) {
+        patch_slot_t *s = &g_state.patch.slots[i];
+        if (s->active &&
+            strncmp(s->name, name, STATE_PATCH_NAME_MAX) == 0)
+            return s;
     }
     return (patch_slot_t *)0;
 }
 
 static patch_slot_t *slot_free(void) {
-    for (int i = 0; i < PATCH_MAX_SLOTS; i++) {
-        if (!rollback_store[i].active) return &rollback_store[i];
+    for (int i = 0; i < STATE_PATCH_MAX_SLOTS; i++) {
+        if (!g_state.patch.slots[i].active)
+            return &g_state.patch.slots[i];
     }
     return (patch_slot_t *)0;
 }
@@ -261,7 +250,7 @@ static int t_patch_symbol(const tool_call_t *call, tool_result_t *r) {
         return TOOL_OK;
     }
 
-    char name[PATCH_NAME_MAX];
+    char name[STATE_PATCH_NAME_MAX];
     if (pt_arg_str(&root, "name", name, sizeof name, err, sizeof err) <= 0) {
         r->is_error = 1;
         tool_result_printf(r, "%s\n",
@@ -321,8 +310,8 @@ REGISTER_TOOL(patch_symbol_tool);
 /* patch_apply                                                             */
 /* ====================================================================== */
 
-static char pa_hex_arg[PATCH_MAX_BYTES * 3 + 1];   /* "XX XX ..." */
-static char pa_name_arg[PATCH_NAME_MAX];
+static char pa_hex_arg[STATE_PATCH_MAX_BYTES * 3 + 1];   /* "XX XX ..." */
+static char pa_name_arg[STATE_PATCH_NAME_MAX];
 
 static int t_patch_apply(const tool_call_t *call, tool_result_t *r) {
     char         err[160];
@@ -352,7 +341,7 @@ static int t_patch_apply(const tool_call_t *call, tool_result_t *r) {
     }
 
     /* decode hex -> bytes */
-    uint8_t bytes[PATCH_MAX_BYTES];
+    uint8_t bytes[STATE_PATCH_MAX_BYTES];
     size_t  blen = 0;
     int hrc = hex_decode(pa_hex_arg, bytes, sizeof bytes, &blen);
     if (hrc == -1) {
@@ -362,10 +351,10 @@ static int t_patch_apply(const tool_call_t *call, tool_result_t *r) {
             "hex digits optionally separated by spaces (e.g. \"90 90\")\n");
         return TOOL_OK;
     }
-    if (hrc == -2 || blen > PATCH_MAX_BYTES) {
+    if (hrc == -2 || blen > STATE_PATCH_MAX_BYTES) {
         r->is_error = 1;
         tool_result_printf(r,
-            "patch is too long: maximum is %d bytes\n", PATCH_MAX_BYTES);
+            "patch is too long: maximum is %d bytes\n", STATE_PATCH_MAX_BYTES);
         return TOOL_OK;
     }
     if (blen == 0) {
@@ -415,35 +404,39 @@ static int t_patch_apply(const tool_call_t *call, tool_result_t *r) {
         return TOOL_OK;
     }
 
-    /* find a free slot */
-    patch_slot_t *s = slot_free();
-    if (!s) {
+    /* refuse if rollback store is full */
+    if (!slot_free()) {
         r->is_error = 1;
         tool_result_printf(r,
             "rollback store is full (%d active patches); "
             "call patch_rollback on one before adding another\n",
-            PATCH_MAX_SLOTS);
+            STATE_PATCH_MAX_SLOTS);
         return TOOL_OK;
     }
 
-    /* save original bytes */
-    memcpy(s->orig,  (const void *)addr, blen);
-    memcpy(s->patch, bytes,              blen);
-    strncpy(s->name, pa_name_arg, PATCH_NAME_MAX - 1);
-    s->name[PATCH_NAME_MAX - 1] = '\0';
-    s->addr   = addr;
-    s->len    = blen;
+    /* save original bytes before writing */
+    uint8_t orig[STATE_PATCH_MAX_BYTES];
+    memcpy(orig, (const void *)addr, blen);
 
     /* write the patch — all pages are RWX (AGENTS.md) */
     memcpy((void *)addr, bytes, blen);
 
-    /* mark slot active AFTER the write succeeds */
-    s->active = 1;
+    /* record in g_state AFTER the write succeeds */
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type = ACT_PATCH_APPLY;
+    strncpy(act.u.patch_apply.name, pa_name_arg,
+            sizeof act.u.patch_apply.name - 1);
+    act.u.patch_apply.addr = addr;
+    act.u.patch_apply.len  = (uint8_t)blen;
+    memcpy(act.u.patch_apply.orig,        orig,  blen);
+    memcpy(act.u.patch_apply.patch_bytes, bytes, blen);
+    state_dispatch(&act);
 
-    char hex_orig[PATCH_MAX_BYTES * 3 + 1];
-    char hex_new [PATCH_MAX_BYTES * 3 + 1];
-    hex_encode(s->orig,  blen, hex_orig, sizeof hex_orig);
-    hex_encode(s->patch, blen, hex_new,  sizeof hex_new);
+    char hex_orig[STATE_PATCH_MAX_BYTES * 3 + 1];
+    char hex_new [STATE_PATCH_MAX_BYTES * 3 + 1];
+    hex_encode(orig,  blen, hex_orig, sizeof hex_orig);
+    hex_encode(bytes, blen, hex_new,  sizeof hex_new);
 
     tool_result_printf(r,
         "patched %s at 0x%016lx (%zu bytes)\n"
@@ -493,7 +486,7 @@ REGISTER_TOOL(patch_apply_tool);
 /* patch_rollback                                                          */
 /* ====================================================================== */
 
-static char pr_name_arg[PATCH_NAME_MAX];
+static char pr_name_arg[STATE_PATCH_NAME_MAX];
 
 static int t_patch_rollback(const tool_call_t *call, tool_result_t *r) {
     char         err[160];
@@ -521,22 +514,33 @@ static int t_patch_rollback(const tool_call_t *call, tool_result_t *r) {
         return TOOL_OK;
     }
 
-    /* restore original bytes */
-    memcpy((void *)s->addr, s->orig, s->len);
+    /* read rollback data before modifying state */
+    uintptr_t addr = s->addr;
+    size_t    len  = s->len;
+    uint8_t   orig[STATE_PATCH_MAX_BYTES];
+    memcpy(orig, s->orig, len);
 
-    char hex_restored[PATCH_MAX_BYTES * 3 + 1];
-    hex_encode(s->orig, s->len, hex_restored, sizeof hex_restored);
+    /* restore original bytes */
+    memcpy((void *)addr, orig, len);
+
+    /* clear the slot in g_state AFTER the write succeeds */
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type = ACT_PATCH_ROLLBACK;
+    strncpy(act.u.patch_rollback.name, pr_name_arg,
+            sizeof act.u.patch_rollback.name - 1);
+    state_dispatch(&act);
+
+    char hex_restored[STATE_PATCH_MAX_BYTES * 3 + 1];
+    hex_encode(orig, len, hex_restored, sizeof hex_restored);
 
     tool_result_printf(r,
         "rolled back %s at 0x%016lx (%zu bytes restored)\n"
         "  restored: %s\n",
         pr_name_arg,
-        (unsigned long)s->addr,
-        s->len,
+        (unsigned long)addr,
+        len,
         hex_restored);
-
-    /* clear the slot */
-    memset(s, 0, sizeof *s);
 
     return TOOL_OK;
 }
@@ -571,36 +575,36 @@ static int t_patch_status(const tool_call_t *call, tool_result_t *r) {
     (void)call;
 
     int active = 0;
-    for (int i = 0; i < PATCH_MAX_SLOTS; i++) {
-        if (rollback_store[i].active) active++;
+    for (int i = 0; i < STATE_PATCH_MAX_SLOTS; i++) {
+        if (g_state.patch.slots[i].active) active++;
     }
 
     tool_result_printf(r,
-        "active patches: %d / %d slots used\n", active, PATCH_MAX_SLOTS);
+        "active patches: %d / %d slots used\n", active, STATE_PATCH_MAX_SLOTS);
 
     if (active == 0) {
         tool_result_printf(r, "no functions are currently patched\n");
         return TOOL_OK;
     }
 
-    for (int i = 0; i < PATCH_MAX_SLOTS; i++) {
-        const patch_slot_t *s = &rollback_store[i];
+    for (int i = 0; i < STATE_PATCH_MAX_SLOTS; i++) {
+        const patch_slot_t *s = &g_state.patch.slots[i];
         if (!s->active) continue;
 
-        char hex_orig [PATCH_MAX_BYTES * 3 + 1];
-        char hex_patch[PATCH_MAX_BYTES * 3 + 1];
-        hex_encode(s->orig,  s->len, hex_orig,  sizeof hex_orig);
-        hex_encode(s->patch, s->len, hex_patch, sizeof hex_patch);
+        char hex_orig [STATE_PATCH_MAX_BYTES * 3 + 1];
+        char hex_patch[STATE_PATCH_MAX_BYTES * 3 + 1];
+        hex_encode(s->orig,        s->len, hex_orig,  sizeof hex_orig);
+        hex_encode(s->patch_bytes, s->len, hex_patch, sizeof hex_patch);
 
         tool_result_printf(r,
             "  %s\n"
             "    address:  0x%016lx\n"
-            "    size:     %zu bytes\n"
+            "    size:     %u bytes\n"
             "    original: %s\n"
             "    patched:  %s\n",
             s->name,
             (unsigned long)s->addr,
-            s->len,
+            (unsigned)s->len,
             hex_orig,
             hex_patch);
     }

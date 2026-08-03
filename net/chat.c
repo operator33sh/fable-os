@@ -13,6 +13,7 @@
  */
 
 #include "chat.h"
+#include "state.h"
 #include "kernel.h"
 #include "json.h"
 #include "tool.h"
@@ -271,27 +272,15 @@ const char *chat_system_prompt(void) { return SYSTEM_PROMPT; }
 static const char ROLE_USER[]      = "user";
 static const char ROLE_ASSISTANT[] = "assistant";
 
-/* One remembered message. `off`/`len` locate its raw JSON *content* value in
- * the arena; `epoch` is the operator turn it belongs to, which is the unit of
- * eviction (see chat.h). */
-typedef struct {
-    uint32_t    off;
-    uint32_t    len;
-    uint16_t    epoch;
-    const char *role;
-} hist_msg_t;
+/* History, tool schema, lifecycle state and counters live in g_state.chat
+ * (include/state.h).  chat_hist_msg_t (was hist_msg_t) also lives there.
+ * Non-zero defaults (max_rounds=CHAT_MAX_ROUNDS) are set by the
+ * ACT_CHAT_INIT reducer in core/state.c. */
 
-static char       hist_arena[CHAT_HISTORY_BYTES];
-static hist_msg_t hist[CHAT_HISTORY_MSGS];
-static size_t     hist_n;        /* messages held                    */
-static size_t     hist_used;     /* arena bytes held (contiguous)    */
-static uint16_t   hist_epoch;    /* the turn currently being run     */
-
-static char   req_buf[CHAT_REQ_BYTES];
-static char   resp_buf[CHAT_RESP_BYTES];
-static char   tools_buf[CHAT_TOOLS_BYTES];
-static size_t tools_len;
-static int    tools_ready;
+/* Scratch buffers — never moved to g_state because they hold in-flight data
+ * with no externally observable lifetime between turns. */
+static char req_buf[CHAT_REQ_BYTES];
+static char resp_buf[CHAT_RESP_BYTES];
 
 /* The user turn that carries this round's tool_result blocks and the kernel's
  * budget note, assembled before it is copied into the history arena. */
@@ -303,32 +292,24 @@ static char text_buf[8192];
 
 const char *chat_last_response_text(void) { return text_buf; }
 
-static model_transport_t *transport;
-
-static unsigned max_rounds = CHAT_MAX_ROUNDS;
-static unsigned stat_rounds;
-static unsigned stat_tool_calls;
-static unsigned stat_evictions;
-static unsigned stat_retries;      /* link failures retried in this turn */
-
 /* ====================================================================== */
 /* the action journal — what the kernel actually ran                       */
 /* ====================================================================== */
 
-/* A ring, so a long session keeps the most recent actions rather than the first
- * ones. Deliberately NOT rolled back with the conversation: the conversation is
- * a record of what was said and must stay valid to be resent, while this is a
- * record of what the machine DID, and a turn that was abandoned still did it.
- * That asymmetry is the whole value — see chat.h. */
-static chat_action_t journal[CHAT_JOURNAL_ENTRIES];
-static unsigned      journal_total;          /* dispatched since boot */
+/* The action journal lives in g_state.chat.journal / g_state.chat.journal_total.
+ * It is a ring so a long session keeps the most recent actions rather than the
+ * first ones.  Deliberately NOT rolled back with the conversation: the
+ * conversation is a record of what was said and must stay valid to be resent,
+ * while this is a record of what the machine DID, and a turn that was
+ * abandoned still did it.  That asymmetry is the whole value — see chat.h. */
 
-unsigned chat_turn(void)         { return hist_epoch; }
-unsigned chat_action_total(void) { return journal_total; }
+unsigned chat_turn(void)         { return g_state.chat.epoch; }
+unsigned chat_action_total(void) { return g_state.chat.journal_total; }
 
 unsigned chat_action_count(void) {
-    return journal_total < CHAT_JOURNAL_ENTRIES ? journal_total
-                                                : CHAT_JOURNAL_ENTRIES;
+    return g_state.chat.journal_total < CHAT_JOURNAL_ENTRIES
+               ? g_state.chat.journal_total
+               : CHAT_JOURNAL_ENTRIES;
 }
 
 const chat_action_t *chat_action_at(unsigned i) {
@@ -336,9 +317,9 @@ const chat_action_t *chat_action_at(unsigned i) {
     if (i >= n) return (const chat_action_t *)0;
     /* Oldest kept entry first. Once the ring has wrapped, that is the slot
      * immediately after the newest. */
-    unsigned base = (journal_total <= CHAT_JOURNAL_ENTRIES)
-                        ? 0 : journal_total % CHAT_JOURNAL_ENTRIES;
-    return &journal[(base + i) % CHAT_JOURNAL_ENTRIES];
+    unsigned base = (g_state.chat.journal_total <= CHAT_JOURNAL_ENTRIES)
+                        ? 0 : g_state.chat.journal_total % CHAT_JOURNAL_ENTRIES;
+    return &g_state.chat.journal[(base + i) % CHAT_JOURNAL_ENTRIES];
 }
 
 /* Copy a bounded, single-line, printable-only summary. The name and the result
@@ -364,85 +345,88 @@ static void journal_copy(char *dst, size_t cap, const char *src) {
 }
 
 /* Record one dispatched call, from the dispatch result — never from the model's
- * account of it. */
+ * account of it.  Sanitise name/detail with journal_copy before dispatch so the
+ * reducer's bstr_copy only sees clean bytes. */
 static void journal_record(const char *name, const char *detail, int failed) {
-    chat_action_t *e = &journal[journal_total % CHAT_JOURNAL_ENTRIES];
-
-    journal_total++;
-    e->seq    = journal_total;
-    e->turn   = hist_epoch;
-    e->failed = failed ? 1 : 0;
-    journal_copy(e->name, sizeof e->name, (name && name[0]) ? name : "(no name)");
-    journal_copy(e->detail, sizeof e->detail, detail);
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                         = ACT_CHAT_JOURNAL_RECORD;
+    act.u.chat_journal_record.failed = failed;
+    journal_copy(act.u.chat_journal_record.name,
+                 sizeof act.u.chat_journal_record.name,
+                 (name && name[0]) ? name : "(no name)");
+    journal_copy(act.u.chat_journal_record.detail,
+                 sizeof act.u.chat_journal_record.detail,
+                 detail ? detail : "");
+    state_dispatch(&act);
 }
 
 /* ====================================================================== */
 /* history                                                                 */
 /* ====================================================================== */
 
-/* IN A TURN. See the re-entrancy paragraph on chat_ask() in include/chat.h for
- * what a nested call used to do; this is the whole of the defence. A flag and
- * not a counter, because there is no sane meaning for "two levels of turn": the
- * buffers are singletons. Cleared on every exit path, including the early ones,
- * which is why chat_ask() is a thin wrapper around chat_ask_body(). */
-static int in_turn;
+/* IN A TURN.  The re-entrancy guard lives in g_state.chat.in_turn; see
+ * include/chat.h for what a nested call used to do. Cleared on every exit
+ * path via ACT_CHAT_TURN_END, which is why chat_ask() is a thin wrapper. */
 
 void chat_reset(void) {
-    in_turn    = 0;
-    hist_n     = 0;
-    hist_used  = 0;
-    hist_epoch = 0;
+    state_dispatch(&(action_t){.type = ACT_CHAT_RESET});
 }
 
 static void tools_load(void);
 
 void chat_init(model_transport_t *t) {
-    transport = t;
-    chat_reset();
-    stat_rounds = stat_tool_calls = stat_evictions = stat_retries = 0;
-    max_rounds  = CHAT_MAX_ROUNDS;
-    tools_ready = 0;
-    journal_total = 0;
-    memset(journal, 0, sizeof journal);
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                 = ACT_CHAT_INIT;
+    act.u.chat_init.transport = t;
+    state_dispatch(&act);
     /* Assemble the schema now rather than on the first sentence: its size is a
      * fixed property of this build, and the operator should learn at boot — not
      * mid-turn — if the machine's own syscall surface does not fit. */
     tools_load();
 }
 
-size_t   chat_history_messages(void) { return hist_n; }
-size_t   chat_history_bytes(void)    { return hist_used; }
-unsigned chat_last_rounds(void)      { return stat_rounds; }
-unsigned chat_last_tool_calls(void)  { return stat_tool_calls; }
-unsigned chat_evictions(void)        { return stat_evictions; }
-size_t   chat_tools_bytes(void)      { return tools_len; }
+size_t   chat_history_messages(void) { return g_state.chat.msgs_n; }
+size_t   chat_history_bytes(void)    { return g_state.chat.arena_used; }
+unsigned chat_last_rounds(void)      { return g_state.chat.stat_rounds; }
+unsigned chat_last_tool_calls(void)  { return g_state.chat.stat_tool_calls; }
+unsigned chat_evictions(void)        { return g_state.chat.stat_evictions; }
+size_t   chat_tools_bytes(void)      { return g_state.chat.tools_len; }
 
 void chat_set_max_rounds(unsigned n) {
-    max_rounds = (n == 0 || n > CHAT_MAX_ROUNDS) ? CHAT_MAX_ROUNDS : n;
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                    = ACT_CHAT_SET_MAX_ROUNDS;
+    act.u.chat_set_max_rounds.n = n;
+    state_dispatch(&act);
 }
 
 /* Drop every message of the oldest epoch present and compact the arena.
  * Returns 1 if anything was dropped. The in-flight epoch is never touched:
- * a turn is only valid as a whole, and half of one is worse than none. */
+ * a turn is only valid as a whole, and half of one is worse than none.
+ * Arena/msgs/msgs_n/arena_used are mutated directly — fine-grained internal
+ * bookkeeping, same exemption as the rip_* helpers in faultchat.c. */
 static int hist_drop_oldest_epoch(void) {
-    if (hist_n == 0) return 0;
+    if (g_state.chat.msgs_n == 0) return 0;
 
-    uint16_t victim = hist[0].epoch;
-    if (victim == hist_epoch) return 0;      /* only the in-flight turn is left */
+    uint16_t victim = g_state.chat.msgs[0].epoch;
+    if (victim == g_state.chat.epoch) return 0;
 
     size_t k = 0;
-    while (k < hist_n && hist[k].epoch == victim) k++;
+    while (k < g_state.chat.msgs_n && g_state.chat.msgs[k].epoch == victim) k++;
 
-    size_t bytes = hist[k - 1].off + hist[k - 1].len;   /* entries are in order */
-    memmove(hist_arena, hist_arena + bytes, hist_used - bytes);
-    hist_used -= bytes;
+    size_t bytes = g_state.chat.msgs[k - 1].off + g_state.chat.msgs[k - 1].len;
+    memmove(g_state.chat.arena, g_state.chat.arena + bytes,
+            g_state.chat.arena_used - bytes);
+    g_state.chat.arena_used -= bytes;
 
-    for (size_t i = k; i < hist_n; i++) {
-        hist[i - k]      = hist[i];
-        hist[i - k].off -= (uint32_t)bytes;
+    for (size_t i = k; i < g_state.chat.msgs_n; i++) {
+        g_state.chat.msgs[i - k]      = g_state.chat.msgs[i];
+        g_state.chat.msgs[i - k].off -= (uint32_t)bytes;
     }
-    hist_n -= k;
-    stat_evictions++;
+    g_state.chat.msgs_n -= k;
+    state_dispatch(&(action_t){.type = ACT_CHAT_EVICTION});
     return 1;
 }
 
@@ -474,27 +458,25 @@ static int hist_drop_oldest_epoch(void) {
  * a history shaped in some way this reasoning did not anticipate is left alone
  * and the old CHAT_EHISTORY path still catches it. */
 static int hist_drop_oldest_attempt(void) {
-    if (hist_n < 3)                     return 0;
-    if (hist[0].epoch != hist_epoch)    return 0;   /* older exchanges first */
-    if (hist[1].epoch != hist_epoch ||
-        hist[2].epoch != hist_epoch)    return 0;
-    if (hist[1].role != ROLE_ASSISTANT ||
-        hist[2].role != ROLE_USER)      return 0;
+    if (g_state.chat.msgs_n < 3)                              return 0;
+    if (g_state.chat.msgs[0].epoch != g_state.chat.epoch)    return 0;
+    if (g_state.chat.msgs[1].epoch != g_state.chat.epoch ||
+        g_state.chat.msgs[2].epoch != g_state.chat.epoch)    return 0;
+    if (g_state.chat.msgs[1].role != ROLE_ASSISTANT ||
+        g_state.chat.msgs[2].role != ROLE_USER)              return 0;
 
-    size_t off   = hist[1].off;
-    size_t bytes = (size_t)hist[1].len + hist[2].len;
-    memmove(hist_arena + off, hist_arena + off + bytes,
-            hist_used - off - bytes);
-    hist_used -= bytes;
+    size_t off   = g_state.chat.msgs[1].off;
+    size_t bytes = (size_t)g_state.chat.msgs[1].len + g_state.chat.msgs[2].len;
+    memmove(g_state.chat.arena + off, g_state.chat.arena + off + bytes,
+            g_state.chat.arena_used - off - bytes);
+    g_state.chat.arena_used -= bytes;
 
-    for (size_t i = 3; i < hist_n; i++) {
-        hist[i - 2]      = hist[i];
-        hist[i - 2].off -= (uint32_t)bytes;
+    for (size_t i = 3; i < g_state.chat.msgs_n; i++) {
+        g_state.chat.msgs[i - 2]      = g_state.chat.msgs[i];
+        g_state.chat.msgs[i - 2].off -= (uint32_t)bytes;
     }
-    hist_n -= 2;
-    stat_evictions++;
-    /* The operator is watching a turn take many rounds; this says why it is
-     * still going and what it cost. No model-chosen bytes (include/trace.h). */
+    g_state.chat.msgs_n -= 2;
+    state_dispatch(&(action_t){.type = ACT_CHAT_EVICTION});
     kprintf("[chat: this turn no longer fits its memory - forgot its oldest "
             "failed attempt (%u bytes) and carried on]\n", (unsigned)bytes);
     return 1;
@@ -505,21 +487,22 @@ static int hist_drop_oldest_attempt(void) {
  * hold this turn (CHAT_EHISTORY territory). */
 static char *hist_reserve(size_t need) {
     for (;;) {
-        if (hist_n < CHAT_HISTORY_MSGS && hist_used + need <= CHAT_HISTORY_BYTES)
-            return hist_arena + hist_used;
-        if (hist_drop_oldest_epoch())  continue;
+        if (g_state.chat.msgs_n < CHAT_HISTORY_MSGS &&
+            g_state.chat.arena_used + need <= CHAT_HISTORY_BYTES)
+            return g_state.chat.arena + g_state.chat.arena_used;
+        if (hist_drop_oldest_epoch())   continue;
         if (hist_drop_oldest_attempt()) continue;
         return (char *)0;
     }
 }
 
 static void hist_commit(const char *role, size_t len) {
-    hist[hist_n].off   = (uint32_t)hist_used;
-    hist[hist_n].len   = (uint32_t)len;
-    hist[hist_n].epoch = hist_epoch;
-    hist[hist_n].role  = role;
-    hist_used += len;
-    hist_n++;
+    g_state.chat.msgs[g_state.chat.msgs_n].off   = (uint32_t)g_state.chat.arena_used;
+    g_state.chat.msgs[g_state.chat.msgs_n].len   = (uint32_t)len;
+    g_state.chat.msgs[g_state.chat.msgs_n].epoch = g_state.chat.epoch;
+    g_state.chat.msgs[g_state.chat.msgs_n].role  = role;
+    g_state.chat.arena_used += len;
+    g_state.chat.msgs_n++;
 }
 
 /* Append a raw JSON content value (an array of blocks, typically). */
@@ -556,9 +539,10 @@ static int hist_append_text(const char *role, const char *text) {
  * final assistant message must leave no trace in the history, or the next
  * request would carry a dangling tool_use, or two user turns in a row. */
 static void hist_rollback_epoch(void) {
-    while (hist_n && hist[hist_n - 1].epoch == hist_epoch) {
-        hist_n--;
-        hist_used = hist[hist_n].off;
+    while (g_state.chat.msgs_n &&
+           g_state.chat.msgs[g_state.chat.msgs_n - 1].epoch == g_state.chat.epoch) {
+        g_state.chat.msgs_n--;
+        g_state.chat.arena_used = g_state.chat.msgs[g_state.chat.msgs_n].off;
     }
 }
 
@@ -603,15 +587,17 @@ static void tools_load(void) {
      * WOULD need and touches nothing, which is what makes "keep the last good
      * schema" implementable without a second 56 KiB buffer: a rebuild that
      * cannot fit is never started, so the bytes already in tools_buf survive. */
-    if (tools_ready && tools_build_schema((char *)0, 0) >= sizeof tools_buf) {
+    if (g_state.chat.tools_ready &&
+        tools_build_schema((char *)0, 0) >= sizeof g_state.chat.tools_buf) {
         kprintf("[chat: the tool schema has grown past %u bytes since boot - "
                 "the model keeps the schema from the start of this boot, so any "
                 "tool added or renamed since is invisible to it]\n",
-                (unsigned)sizeof tools_buf);
+                (unsigned)sizeof g_state.chat.tools_buf);
         return;
     }
 
-    size_t need = tools_build_schema(tools_buf, sizeof tools_buf);
+    size_t need = tools_build_schema(g_state.chat.tools_buf,
+                                     sizeof g_state.chat.tools_buf);
 
     /* Validate rather than trust the length. A schema clipped mid-array is not
      * a short schema, it is a corrupt request body, and the model would be told
@@ -620,23 +606,28 @@ static void tools_load(void) {
      * actually wrote, so a chunk the writer refused whole leaves a length that
      * looks like it fitted. (Worth fixing in core/tool.c; not this file's.) */
     json_value_t v;
-    if (need >= sizeof tools_buf || json_parse(tools_buf, need, &v) != JSON_OK) {
+    if (need >= sizeof g_state.chat.tools_buf ||
+        json_parse(g_state.chat.tools_buf, need, &v) != JSON_OK) {
         kprintf("[chat: the tool schema does not fit %u bytes - the model will "
-                "be offered %s]\n", (unsigned)sizeof tools_buf,
-                tools_ready ? "no tools at all (the schema became invalid "
-                              "during this boot)"
-                            : "no tools at all");
+                "be offered %s]\n", (unsigned)sizeof g_state.chat.tools_buf,
+                g_state.chat.tools_ready
+                    ? "no tools at all (the schema became invalid during this boot)"
+                    : "no tools at all");
         /* Getting here after a successful boot build means the schema FITS but
          * does not PARSE, i.e. some description or input_schema became invalid
          * during the session. There is nothing good left in the buffer to keep,
          * so this is the one case that really does end with no tools — and it
          * says which of the two situations it is. */
-        tools_buf[0] = '\0';
-        tools_len    = 0;
+        g_state.chat.tools_buf[0] = '\0';
+        g_state.chat.tools_len    = 0;
         return;
     }
-    tools_len   = need;
-    tools_ready = 1;
+
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                    = ACT_CHAT_TOOLS_LOADED;
+    act.u.chat_tools_loaded.tools_len = need;
+    state_dispatch(&act);
 }
 
 /* On the final permitted round the request is sent with tool calling turned OFF.
@@ -694,24 +685,24 @@ static int build_request(size_t *out_len, int offer_tools) {
 
     tools_load();
 
-    size_t offer_len = tools_len;
+    size_t offer_len = g_state.chat.tools_len;
 
     for (;;) {
-        for (size_t i = 0; i < hist_n; i++) {
-            msgs[i].role        = hist[i].role;
-            msgs[i].content     = hist_arena + hist[i].off;
-            msgs[i].content_len = hist[i].len;
+        for (size_t i = 0; i < g_state.chat.msgs_n; i++) {
+            msgs[i].role        = g_state.chat.msgs[i].role;
+            msgs[i].content     = g_state.chat.arena + g_state.chat.msgs[i].off;
+            msgs[i].content_len = g_state.chat.msgs[i].len;
             msgs[i].raw         = 1;
         }
 
         model_request_t rq;
-        rq.model         = (const char *)0;      /* model.c's compiled default */
+        rq.model         = (const char *)0;
         rq.max_tokens    = CHAT_MAX_OUTPUT_TOKENS;
         rq.system        = SYSTEM_PROMPT;
-        rq.tools         = offer_len ? tools_buf : (const char *)0;
+        rq.tools         = offer_len ? g_state.chat.tools_buf : (const char *)0;
         rq.tools_len     = offer_len;
         rq.messages      = msgs;
-        rq.message_count = hist_n;
+        rq.message_count = g_state.chat.msgs_n;
 
         int n = model_build(req_buf, sizeof req_buf, &rq);
         if (n >= 0) {
@@ -1019,7 +1010,7 @@ static void put_tool_result(json_writer_t *w, int first, size_t pending,
  * enough for the model to triage: finish the important half, then report.
  *
  * This is the only kernel voice inside the conversation, and it is the loop's
- * fact, not the model's: written in C from stat_rounds. It is a text block, not
+ * fact, not the model's: written in C from g_state.chat.stat_rounds. It is a text block, not
  * a tool_result, because it answers nothing the model asked for. It goes last so
  * the tool_result blocks it accompanies still lead the turn, as the API
  * requires. */
@@ -1103,7 +1094,7 @@ static int chat_ask_body(const char *sentence);
 int chat_ask(const char *sentence) {
     if (!sentence) return CHAT_EINVAL;
 
-    if (in_turn) {
+    if (g_state.chat.in_turn) {
         /* Say it in the kernel's own voice, because the caller is usually a tool
          * handler whose result the model reads, and "the store could not be read
          * or written" — which is what core/agenda.c used to flatten this into —
@@ -1115,28 +1106,33 @@ int chat_ask(const char *sentence) {
         return CHAT_EREENTER;
     }
 
-    in_turn = 1;
+    action_t begin;
+    memset(&begin, 0, sizeof begin);
+    begin.type                   = ACT_CHAT_TURN_BEGIN;
+    begin.u.chat_turn_begin.epoch = (uint16_t)(g_state.chat.epoch + 1);
+    state_dispatch(&begin);
+
     int rc = chat_ask_body(sentence);
-    in_turn = 0;
+    state_dispatch(&(action_t){.type = ACT_CHAT_TURN_END});
     return rc;
 }
 
-void chat_turn_ended(void) { in_turn = 0; }
+void chat_turn_ended(void) {
+    state_dispatch(&(action_t){.type = ACT_CHAT_TURN_END});
+}
 
 /* Export chat_ask so patch_tools can locate it at runtime. */
 EXPORT_SYMBOL(chat_ask);
 
 static int chat_ask_body(const char *sentence) {
-    stat_rounds     = 0;
-    stat_tool_calls = 0;
-    stat_retries    = 0;
+    /* Per-turn stat resets and epoch bump are performed by ACT_CHAT_TURN_BEGIN
+     * dispatched in chat_ask() before this function is called. */
 
-    if (!transport) {
+    if (!g_state.chat.transport) {
         kputs("[no link to the model - this machine cannot act]\n");
         return CHAT_ETRANSPORT;
     }
 
-    hist_epoch++;
     if (hist_append_text(ROLE_USER, sentence) != CHAT_OK) {
         kputs("[chat: that is longer than the whole conversation buffer - "
               "nothing was sent]\n");
@@ -1144,62 +1140,63 @@ static int chat_ask_body(const char *sentence) {
     }
 
     for (;;) {
-        if (stat_rounds >= max_rounds) {
+        if (g_state.chat.stat_rounds >= g_state.chat.max_rounds) {
             /* The conversation is rolled back, but the actions were real and the
              * operator has already seen their trace lines. Say so, and say that
              * the record survives, so "what did you get done?" is a question the
              * next sentence can actually answer (chat_action_at(), exposed to the
              * model as the action_log tool). */
             kprintf("[chat: stopped after %u tool rounds without an answer - "
-                    "the turn was abandoned]\n", max_rounds);
+                    "the turn was abandoned]\n", g_state.chat.max_rounds);
             kprintf("[chat: %u tool calls did run and were traced above; the "
                     "kernel's record of them survives - ask what was done]\n",
-                    stat_tool_calls);
+                    g_state.chat.stat_tool_calls);
             return abort_turn(CHAT_ELIMIT);
         }
 
         /* The last permitted round is sent with tool calling turned off — see
          * build_request(). The model was warned in the previous round's budget
          * note, so this is the promise being kept rather than a surprise. */
-        int last_round = (stat_rounds + 1 >= max_rounds);
+        int last_round = (g_state.chat.stat_rounds + 1 >= g_state.chat.max_rounds);
 
         size_t req_len = 0;
         int    rc      = build_request(&req_len, !last_round);
         if (rc != CHAT_OK) return abort_turn(rc);
 
         model_response_t r;
-        rc = model_send(transport, req_buf, req_len, resp_buf, sizeof resp_buf, &r);
+        rc = model_send(g_state.chat.transport, req_buf, req_len,
+                        resp_buf, sizeof resp_buf, &r);
         if (rc != MODEL_OK) {
-            const char *why = model_last_error(transport);
+            const char *why = model_last_error(g_state.chat.transport);
             kprintf("[model unreachable: %s]\n",
                     (why && why[0]) ? why : model_strerror(rc));
             /* A retry does NOT spend a round: the model never saw this request,
              * so charging it for the attempt would shorten the job for a reason
              * the model cannot see or do anything about. */
-            if (send_retryable(rc) && stat_retries < CHAT_SEND_RETRIES) {
-                stat_retries++;
+            if (send_retryable(rc) && g_state.chat.stat_retries < CHAT_SEND_RETRIES) {
+                g_state.chat.stat_retries++;
                 kprintf("[chat: retrying, attempt %u of %u - the work already "
                         "done this turn is kept]\n",
-                        stat_retries, (unsigned)CHAT_SEND_RETRIES);
+                        g_state.chat.stat_retries, (unsigned)CHAT_SEND_RETRIES);
                 continue;
             }
-            stat_rounds++;
+            g_state.chat.stat_rounds++;
             return abort_turn(CHAT_ETRANSPORT);
         }
-        stat_rounds++;
+        g_state.chat.stat_rounds++;
         if (r.http_status != 200) {
             print_http_error(&r);
-            if (http_retryable(r.http_status) && stat_retries < CHAT_SEND_RETRIES) {
-                stat_retries++;
-                stat_rounds--;               /* the model never answered */
+            if (http_retryable(r.http_status) && g_state.chat.stat_retries < CHAT_SEND_RETRIES) {
+                g_state.chat.stat_retries++;
+                g_state.chat.stat_rounds--;               /* the model never answered */
                 kprintf("[chat: the API said try later; retrying, attempt %u of "
-                        "%u]\n", stat_retries, (unsigned)CHAT_SEND_RETRIES);
+                        "%u]\n", g_state.chat.stat_retries, (unsigned)CHAT_SEND_RETRIES);
                 /* Nothing to wait on: interrupts are masked and this kernel has
                  * no timers, so the delay is a polled busy-wait against the TSC
                  * millisecond clock (lib/base.c). It is the only thing the
                  * machine can do with the time, and going straight back at a
                  * rate limiter would earn the same answer. */
-                mdelay(500u * stat_retries);
+                mdelay(500u * g_state.chat.stat_retries);
                 continue;
             }
             return abort_turn(CHAT_EHTTP);
@@ -1365,7 +1362,7 @@ static int chat_ask_body(const char *sentence) {
             tool_result_t res;
             tool_result_init(&res, result_buf, sizeof result_buf);
             tool_dispatch(&call, &res);          /* emits the kernel trace line */
-            stat_tool_calls++;
+            state_dispatch(&(action_t){.type = ACT_CHAT_TOOL_DISPATCHED});
 
             /* The kernel's own record of the action, taken from the dispatch
              * result rather than from anything the model will later say about
@@ -1401,7 +1398,7 @@ static int chat_ask_body(const char *sentence) {
                     "arguments - %u call(s) arrived empty and were NOT run; it "
                     "was told to send a shorter one]\n", (unsigned)cut);
 
-        put_budget_note(&w, stat_rounds, max_rounds, (unsigned)done,
+        put_budget_note(&w, g_state.chat.stat_rounds, g_state.chat.max_rounds, (unsigned)done,
                         (unsigned)failed);
         json_put_char(&w, ']');
         if (!json_writer_ok(&w)) {

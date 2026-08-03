@@ -19,6 +19,7 @@
  */
 
 #include "faultchat.h"
+#include "state.h"
 
 #include "json.h"
 #include "kernel.h"
@@ -664,10 +665,7 @@ int faultchat_apply_fix(const faultchat_reply_t *reply, char *why, size_t whycap
 
 /* ---- and the same door for a code patch ---- */
 
-/* Declared here rather than in the live-half block below because
- * faultchat_apply_patch() is one of the pure-ish functions and must not depend
- * on where the counters happen to be defined. */
-static uint32_t g_patches;                  /* code patches actually applied */
+/* patch counter lives in g_state.faultchat.patches (see include/state.h) */
 
 int faultchat_apply_patch(const faultchat_reply_t *reply,
                           char *why, size_t whycap) {
@@ -682,7 +680,7 @@ int faultchat_apply_patch(const faultchat_reply_t *reply,
      * the tool cannot tell an operator's deliberate patch from the kernel's own
      * unattended one, and only the second needs a cap. "How much of this kernel
      * has been rewritten with nobody watching" is this module's question. */
-    if (g_patches >= FAULTCHAT_MAX_PATCHES) {
+    if (g_state.faultchat.patches >= FAULTCHAT_MAX_PATCHES) {
         why_say(why, whycap,
                 "this boot has already applied its allowance of unattended code "
                 "patches; nothing was written");
@@ -718,12 +716,12 @@ int faultchat_apply_patch(const faultchat_reply_t *reply,
         return FAULTCHAT_EPATCH;
     }
 
-    g_patches++;
+    state_dispatch(&(action_t){.type = ACT_FAULTCHAT_PATCH_APPLIED});
     why_say(why, whycap, "applied");
     return FAULTCHAT_OK;
 }
 
-uint32_t faultchat_patches_applied(void) { return g_patches; }
+uint32_t faultchat_patches_applied(void) { return g_state.faultchat.patches; }
 
 /* ====================================================================== */
 /* error names                                                            */
@@ -755,43 +753,35 @@ const char *faultchat_strerror(int rc) {
 /* the live half                                                          */
 /* ====================================================================== */
 
-static model_transport_t *g_transport;
-static int                g_enabled = 1;
+/* Lifecycle state and counters live in g_state.faultchat (include/state.h):
+ *   transport, enabled, busy, off, off_why, seen, diagnoses, fixes, patches,
+ *   rip_table[4], rip_next, last_result, last_seq, last_why, last_reply.
+ * Non-zero defaults (enabled=1, last_result=FAULTCHAT_ENONE, off_why="")
+ * are set by the ACT_FAULTCHAT_RESET reducer in core/state.c. */
 
-/* The three independent guards described in the header. */
-static int         g_busy;              /* a request is in flight right now   */
-static int         g_off;               /* latched off for the rest of boot   */
-static const char *g_off_why = "";
-
-static uint32_t g_seen;                 /* fault_count() as of the last pump  */
-static uint32_t g_diagnoses;            /* requests actually sent             */
-static uint32_t g_fixes;                /* proposed fixes that were armed     */
-
-/* PER-ADDRESS ACCOUNTING — the bound that stops an autonomous loop spiralling.
- *
- * A fixed, tiny table rather than a counter, because "we have tried this address
- * twice" and "we have tried two addresses once each" are different situations
- * and only the first one is a machine failing to make progress. Four slots is
- * more than FAULTCHAT_MAX_DIAGNOSES can fill, so the table cannot be a source of
- * false negatives; when it does overflow the oldest slot is reused, which errs
- * towards asking again rather than towards silently giving up. */
-#define FAULTCHAT_RIP_SLOTS 4
-static struct { uint64_t rip; uint32_t tries; } g_rip[FAULTCHAT_RIP_SLOTS];
-static uint32_t g_rip_next;
+/* PER-ADDRESS ACCOUNTING — see state.h for the field layout.
+ * rip_table and rip_next are mutated directly from these helpers, which is
+ * the same exemption the history-arena helpers in chat.c have: fine-grained
+ * bookkeeping inside one function; no externally observable transition. */
+#define FAULTCHAT_RIP_SLOTS 4   /* must match faultchat_state_t.rip_table[4] */
 
 static uint32_t rip_tries(uint64_t rip) {
     for (unsigned i = 0; i < FAULTCHAT_RIP_SLOTS; i++)
-        if (g_rip[i].tries && g_rip[i].rip == rip) return g_rip[i].tries;
+        if (g_state.faultchat.rip_table[i].tries &&
+            g_state.faultchat.rip_table[i].rip == rip)
+            return g_state.faultchat.rip_table[i].tries;
     return 0;
 }
 
 static uint32_t rip_bump(uint64_t rip) {
     for (unsigned i = 0; i < FAULTCHAT_RIP_SLOTS; i++)
-        if (g_rip[i].tries && g_rip[i].rip == rip) return ++g_rip[i].tries;
-    unsigned slot = g_rip_next % FAULTCHAT_RIP_SLOTS;
-    g_rip_next++;
-    g_rip[slot].rip   = rip;
-    g_rip[slot].tries = 1;
+        if (g_state.faultchat.rip_table[i].tries &&
+            g_state.faultchat.rip_table[i].rip == rip)
+            return ++g_state.faultchat.rip_table[i].tries;
+    unsigned slot = g_state.faultchat.rip_next % FAULTCHAT_RIP_SLOTS;
+    g_state.faultchat.rip_next++;
+    g_state.faultchat.rip_table[slot].rip   = rip;
+    g_state.faultchat.rip_table[slot].tries = 1;
     return 1;
 }
 
@@ -801,91 +791,93 @@ uint64_t faultchat_worst_rip(void) {
     uint64_t worst = 0;
     uint32_t best  = 0;
     for (unsigned i = 0; i < FAULTCHAT_RIP_SLOTS; i++)
-        if (g_rip[i].tries > best) { best = g_rip[i].tries; worst = g_rip[i].rip; }
+        if (g_state.faultchat.rip_table[i].tries > best) {
+            best  = g_state.faultchat.rip_table[i].tries;
+            worst = g_state.faultchat.rip_table[i].rip;
+        }
     return worst;
 }
-static int      g_last_result = FAULTCHAT_ENONE;
-static uint32_t g_last_seq;
-static char     g_last_why[FAULTCHAT_WHY_MAX];
 
+/* Scratch buffers — never moved to g_state because they hold in-flight data
+ * with no externally observable lifetime. */
 static char   g_prompt[FAULTCHAT_PROMPT_MAX];
 static size_t g_prompt_len;
 static char   g_req[FAULTCHAT_REQ_BYTES];
 static char   g_resp[FAULTCHAT_RESP_BYTES];
 
-static faultchat_reply_t g_reply;
-
 void faultchat_bind(model_transport_t *t) {
-    g_transport = t;
-    faultchat_reset();
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                       = ACT_FAULTCHAT_BIND;
+    act.u.faultchat_bind.transport = t;
+    act.u.faultchat_bind.seen      = fault_count();
+    state_dispatch(&act);
+    g_prompt[0]  = '\0';
+    g_prompt_len = 0;
 }
 
 void faultchat_reset(void) {
-    g_busy        = 0;
-    g_off         = 0;
-    g_off_why     = "";
-    g_seen        = fault_count();
-    g_diagnoses   = 0;
-    g_fixes       = 0;
-    g_last_result = FAULTCHAT_ENONE;
-    g_last_seq    = 0;
-    g_last_why[0] = '\0';
-    g_prompt[0]   = '\0';
-    g_prompt_len  = 0;
-    g_reply.diagnosis[0] = '\0';
-    g_reply.has_fix      = 0;
-    g_reply.fix[0]       = '\0';
-    g_reply.fix_len      = 0;
-    g_reply.has_patch    = 0;
-    g_reply.patch[0]     = '\0';
-    g_reply.patch_len    = 0;
-    g_patches     = 0;
-    g_rip_next    = 0;
-    for (unsigned i = 0; i < FAULTCHAT_RIP_SLOTS; i++) {
-        g_rip[i].rip   = 0;
-        g_rip[i].tries = 0;
-    }
-    g_enabled     = 1;
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                    = ACT_FAULTCHAT_RESET;
+    act.u.faultchat_reset.seen  = fault_count();
+    state_dispatch(&act);
+    g_prompt[0]  = '\0';
+    g_prompt_len = 0;
 }
 
-void faultchat_enable(int on) { g_enabled = on ? 1 : 0; }
+void faultchat_enable(int on) {
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                  = ACT_FAULTCHAT_ENABLE;
+    act.u.faultchat_enable.on = on ? 1 : 0;
+    state_dispatch(&act);
+}
 
 static void latch_off(const char *why) {
-    g_off     = 1;
-    g_off_why = why;
+    action_t act;
+    memset(&act, 0, sizeof act);
+    act.type                      = ACT_FAULTCHAT_LATCH_OFF;
+    act.u.faultchat_latch_off.why = why;
+    state_dispatch(&act);
 }
 
 int faultchat_pending(void) {
-    if (!g_enabled || g_off || g_busy) return 0;
-    if (g_diagnoses >= FAULTCHAT_MAX_DIAGNOSES) return 0;
-    return fault_count() != g_seen;
+    if (!g_state.faultchat.enabled || g_state.faultchat.off ||
+        g_state.faultchat.busy) return 0;
+    if (g_state.faultchat.diagnoses >= FAULTCHAT_MAX_DIAGNOSES) return 0;
+    return fault_count() != g_state.faultchat.seen;
 }
 
+/* finish() writes last_result and last_why directly — fine-grained internal
+ * bookkeeping at the pump's exit point, same exemption as the rip_* helpers. */
 static int finish(int rc, const char *why) {
-    g_last_result = rc;
-    why_say(g_last_why, sizeof g_last_why, why ? why : faultchat_strerror(rc));
+    g_state.faultchat.last_result = rc;
+    why_say(g_state.faultchat.last_why, sizeof g_state.faultchat.last_why,
+            why ? why : faultchat_strerror(rc));
     return rc;
 }
 
 int faultchat_pump(void) {
     /* Guard 1: re-entrancy. Nothing reachable from here calls back into the
      * pump today, and this is what guarantees that stays true. */
-    if (g_busy) return FAULTCHAT_EBUSY;
+    if (g_state.faultchat.busy) return FAULTCHAT_EBUSY;
 
-    if (!g_enabled) return FAULTCHAT_EOFF;
-    if (g_off)      return FAULTCHAT_EOFF;
+    if (!g_state.faultchat.enabled) return FAULTCHAT_EOFF;
+    if (g_state.faultchat.off)      return FAULTCHAT_EOFF;
 
     uint32_t now = fault_count();
-    if (now == g_seen) return FAULTCHAT_ENONE;
+    if (now == g_state.faultchat.seen) return FAULTCHAT_ENONE;
 
     const fault_record_t *rec = fault_last();
-    if (!rec) { g_seen = now; return FAULTCHAT_ENONE; }
+    if (!rec) { g_state.faultchat.seen = now; return FAULTCHAT_ENONE; }
 
     /* Claim every fault seen so far, before anything can fail. A diagnosis that
      * goes wrong must not be retried on the next pump: the machine would spend
-     * its whole life re-asking about the same crash. */
-    g_seen     = now;
-    g_last_seq = rec->seq;
+     * its whole life re-asking about the same crash. Direct writes: fine-grained
+     * internal bookkeeping within the pump, same exemption as the rip_* helpers. */
+    g_state.faultchat.seen     = now;
+    g_state.faultchat.last_seq = rec->seq;
 
     /* NOTE ON FORMAT STRINGS, because it has cost more than one person a day:
      * kprintf() below is lib/base.c's formatter and has NO 'l' length modifier —
@@ -894,7 +886,7 @@ int faultchat_pump(void) {
      * lib/libc_shim.c one, freestanding) which DOES support it. Two formatters,
      * one name-shaped difference, and the failure is silent. Everything reaching
      * kprintf here is %s / %d / %u / %p only, and 64-bit values go through %p. */
-    if (g_diagnoses >= FAULTCHAT_MAX_DIAGNOSES) {
+    if (g_state.faultchat.diagnoses >= FAULTCHAT_MAX_DIAGNOSES) {
         latch_off("the per-boot diagnosis budget is spent");
         kprintf("[fault-diagnose] fault #%u survived, but this boot has "
                 "already spent its %u diagnoses; not asking again\n",
@@ -926,7 +918,13 @@ int faultchat_pump(void) {
      * transport and a fault storm would otherwise announce every one of them
      * forever, and "how much of this boot is spent talking about crashes" is
      * the quantity the cap is actually about. */
-    g_diagnoses++;
+    {
+        action_t dact;
+        memset(&dact, 0, sizeof dact);
+        dact.type = ACT_FAULTCHAT_DIAGNOSIS_SENT;
+        dact.u.faultchat_diagnosis_sent.new_seen = now;
+        state_dispatch(&dact);
+    }
     rip_bump(rec->regs.rip);
 
     kprintf("[fault-diagnose] fault #%u (%s, vector %u, at %p) was "
@@ -935,7 +933,7 @@ int faultchat_pump(void) {
             (unsigned)rec->regs.vector,
             (void *)(uintptr_t)rec->regs.rip);
 
-    if (!g_transport) {
+    if (!g_state.faultchat.transport) {
         kputs("[fault-diagnose] no transport is bound, so nobody can be asked. "
               "The report above is the whole record.\n");
         return finish(FAULTCHAT_ETRANSPORT, "no transport bound");
@@ -979,17 +977,19 @@ int faultchat_pump(void) {
     }
 
     kprintf("[fault-diagnose] sending %u bytes of machine state over \"%s\"\n",
-            (unsigned)n, g_transport->name ? g_transport->name : "?");
+            (unsigned)n,
+            g_state.faultchat.transport->name
+                ? g_state.faultchat.transport->name : "?");
 
     /* ---- the exchange. Guards 2 and 3 bracket exactly this. ---- */
     uint32_t before = fault_count();
-    g_busy = 1;
+    g_state.faultchat.busy = 1;
 
     model_response_t resp;
-    int rc = model_send(g_transport, g_req, (size_t)n,
+    int rc = model_send(g_state.faultchat.transport, g_req, (size_t)n,
                         g_resp, sizeof g_resp, &resp);
 
-    g_busy = 0;
+    g_state.faultchat.busy = 0;
 
     /* Guard 2: did the machine fault while we were talking? If so the transport
      * was interrupted mid-state-machine and its answer means nothing, even if it
@@ -1007,7 +1007,7 @@ int faultchat_pump(void) {
     }
 
     if (rc != MODEL_OK) {
-        const char *w = model_last_error(g_transport);
+        const char *w = model_last_error(g_state.faultchat.transport);
         kprintf("[fault-diagnose] the model could not be reached: %s\n",
                 (w && w[0]) ? w : model_strerror(rc));
         return finish(FAULTCHAT_ETRANSPORT, "the model could not be reached");
@@ -1026,7 +1026,8 @@ int faultchat_pump(void) {
 
     /* ---- interpret it ---- */
     char why[FAULTCHAT_WHY_MAX];
-    int  prc = faultchat_parse_reply(resp.body, resp.body_len, &g_reply,
+    int  prc = faultchat_parse_reply(resp.body, resp.body_len,
+                                     &g_state.faultchat.last_reply,
                                      why, sizeof why);
     if (prc != FAULTCHAT_OK) {
         kprintf("[fault-diagnose] the reply was not a diagnosis: %s\n", why);
@@ -1035,12 +1036,13 @@ int faultchat_pump(void) {
 
     /* The model's voice, prose, no prefix — the same convention net/chat.c uses.
      * Already sanitised, so it cannot start a line that looks like the kernel's. */
-    if (g_reply.diagnosis[0]) {
-        kputs(g_reply.diagnosis);
+    if (g_state.faultchat.last_reply.diagnosis[0]) {
+        kputs(g_state.faultchat.last_reply.diagnosis);
         kputc('\n');
     }
 
-    if (!g_reply.has_fix && !g_reply.has_patch) {
+    if (!g_state.faultchat.last_reply.has_fix &&
+        !g_state.faultchat.last_reply.has_patch) {
         kputs("[fault-diagnose] the model proposed neither a fix nor a code "
               "patch, which is a complete answer. Nothing was changed.\n");
         return finish(FAULTCHAT_OK, "diagnosed, nothing proposed");
@@ -1056,11 +1058,12 @@ int faultchat_pump(void) {
      * machines, and the console must not blur them into one "fixed". */
     int patch_rc = FAULTCHAT_ENONE, arc = FAULTCHAT_ENONE;
 
-    if (g_reply.has_patch) {
+    if (g_state.faultchat.last_reply.has_patch) {
         kputs("[fault-diagnose] the model proposed a CODE PATCH; handing it to "
               "the fault_patch tool, which validates it exactly as if the model "
               "had called it directly\n");
-        patch_rc = faultchat_apply_patch(&g_reply, why, sizeof why);
+        patch_rc = faultchat_apply_patch(&g_state.faultchat.last_reply,
+                                         why, sizeof why);
         if (patch_rc != FAULTCHAT_OK)
             kprintf("[fault-diagnose] the proposed code patch was NOT applied: "
                     "%s\n", why);
@@ -1070,16 +1073,16 @@ int faultchat_pump(void) {
                   "nothing has verified that the new bytes are CORRECT.\n");
     }
 
-    if (g_reply.has_fix) {
+    if (g_state.faultchat.last_reply.has_fix) {
         kputs("[fault-diagnose] the model proposed a recovery fix; handing it "
               "to the fault_recover tool, which validates it exactly as if the "
               "model had called it directly\n");
-        arc = faultchat_apply_fix(&g_reply, why, sizeof why);
+        arc = faultchat_apply_fix(&g_state.faultchat.last_reply, why, sizeof why);
         if (arc != FAULTCHAT_OK) {
             kprintf("[fault-diagnose] the proposed fix was NOT armed: %s\n",
                     why);
         } else {
-            g_fixes++;
+            state_dispatch(&(action_t){.type = ACT_FAULTCHAT_FIX_ARMED});
             /* SAY WHICH PLAN WAS ARMED, NOT WHAT A PLAN USUALLY DOES.
              *
              * Two of the five actions the fault_recover grammar accepts are not
@@ -1133,13 +1136,13 @@ int faultchat_pump(void) {
 
 /* ---- introspection ---- */
 
-uint32_t    faultchat_diagnoses(void)       { return g_diagnoses; }
-uint32_t    faultchat_fixes_armed(void)     { return g_fixes; }
-int         faultchat_last_result(void)     { return g_last_result; }
-uint32_t    faultchat_last_seq(void)        { return g_last_seq; }
-const char *faultchat_last_diagnosis(void)  { return g_reply.diagnosis; }
+uint32_t    faultchat_diagnoses(void)       { return g_state.faultchat.diagnoses; }
+uint32_t    faultchat_fixes_armed(void)     { return g_state.faultchat.fixes; }
+int         faultchat_last_result(void)     { return g_state.faultchat.last_result; }
+uint32_t    faultchat_last_seq(void)        { return g_state.faultchat.last_seq; }
+const char *faultchat_last_diagnosis(void)  { return g_state.faultchat.last_reply.diagnosis; }
 const char *faultchat_last_prompt(void)     { return g_prompt; }
 size_t      faultchat_last_prompt_len(void) { return g_prompt_len; }
-const char *faultchat_last_why(void)        { return g_last_why; }
-int         faultchat_disabled(void)        { return g_off; }
-const char *faultchat_disabled_reason(void) { return g_off_why; }
+const char *faultchat_last_why(void)        { return g_state.faultchat.last_why; }
+int         faultchat_disabled(void)        { return g_state.faultchat.off; }
+const char *faultchat_disabled_reason(void) { return g_state.faultchat.off_why; }

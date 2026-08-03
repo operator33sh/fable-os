@@ -42,12 +42,11 @@
 #include "faultchat.h"
 #include "fetch.h"
 #include "json.h"
+#include "state.h"
 #include <stdio.h>
 
 /* Provided by tools/telegram_tools.c — no header, keep the coupling minimal. */
-extern void tg_reset_sent(void);
-extern int  tg_was_sent(void);
-extern int  tg_auto_reply(int64_t chat_id, const char *text);
+extern int tg_auto_reply(int64_t chat_id, const char *text);
 
 /* The root stack, reserved and exported by boot/boot.asm. Declared as arrays
  * because these are addresses, not objects: `extern uint8_t stack_top;` would
@@ -383,14 +382,9 @@ static void idle_work(void) {
 /* Static receive buffer for the poll response. Never on the stack. */
 static char tg_rx[2048];
 
-/* When to next attempt a Telegram poll. 0 means "immediately on first tick". */
-static uint64_t tg_next_ms;
-
-/* chat_id of the Telegram message currently being processed, or 0 if the
- * current sentence came from the keyboard. Set in tg_poll(), cleared after
- * the turn completes. Also used to skip the truncation guard (which only
- * makes sense for keyboard lines, not for our own snprintf'd messages). */
-static int64_t tg_active_chat_id;
+/* Telegram timing and active session live in g_state.telegram (state.h).
+ *   g_state.telegram.next_poll_ms   — when to next attempt a poll
+ *   g_state.telegram.active_chat_id — chat_id being processed, or 0 */
 
 /* Poll the bridge for a pending Telegram message.
  *
@@ -437,13 +431,22 @@ static int tg_poll(char *buf, int cap) {
     if (json_get(&root, "text", &vtext) == JSON_OK)
         json_str(&vtext, text_buf, sizeof text_buf, &n);
 
-    tg_active_chat_id = chat_id;
+    {
+        action_t act;
+        memset(&act, 0, sizeof act);
+        act.type = ACT_TG_MESSAGE_RECEIVED;
+        act.u.tg_message_received.chat_id = chat_id;
+        state_dispatch(&act);
+    }
 
     int written = snprintf(buf, (size_t)cap,
         "[Telegram from %s, chat_id=%ld] %s",
         from_name[0] ? from_name : "unknown",
         (long)chat_id, text_buf);
-    if (written <= 0 || written >= cap) { tg_active_chat_id = 0; return 0; }
+    if (written <= 0 || written >= cap) {
+        state_dispatch(&(action_t){.type = ACT_TG_TURN_COMPLETE});
+        return 0;
+    }
     return written;
 }
 
@@ -463,8 +466,12 @@ static int wait_for_sentence(char *buf, int cap) {
          * keyboard input — the main loop never learns the difference. */
         {
             uint64_t now = millis();
-            if (now >= tg_next_ms) {
-                tg_next_ms = now + TG_POLL_INTERVAL_MS;
+            if (now >= g_state.telegram.next_poll_ms) {
+                action_t sched;
+                memset(&sched, 0, sizeof sched);
+                sched.type = ACT_TG_POLL_SCHEDULED;
+                sched.u.tg_poll_scheduled.next_ms = now + TG_POLL_INTERVAL_MS;
+                state_dispatch(&sched);
                 int tg_n = tg_poll(buf, cap);
                 if (tg_n > 0) return tg_n;
             }
@@ -698,7 +705,7 @@ void kernel_main(void) {
          * gets executed. Refuse it loudly rather than act on half of it.
          * Telegram sentences are built by snprintf() in tg_poll(), not by the
          * keyboard driver, so the truncation flag does not apply to them. */
-        if (!tg_active_chat_id && input_line_was_truncated()) {
+        if (!g_state.telegram.active_chat_id && input_line_was_truncated()) {
             kprintf("[input truncated at %d characters - not sent. A cut-off "
                     "sentence could mean something you did not say; "
                     "say it again, shorter.]\n", n);
@@ -731,20 +738,22 @@ void kernel_main(void) {
             kputs("[net recovered - the model is reachable again]\n");
         }
 
-        if (tg_active_chat_id) tg_reset_sent();
         chat_ask(line);
 
         /* AUTO-DISPATCH: if the sentence came from Telegram and the LLM did
          * not call telegram_send during the turn, send its text response
          * ourselves. This makes Telegram work reliably even when the model
-         * produces prose instead of a tool call. */
-        if (tg_active_chat_id) {
-            if (!tg_was_sent()) {
+         * produces prose instead of a tool call.
+         *
+         * ACT_TG_TURN_COMPLETE resets both active_chat_id and sent, so the
+         * next telegram message starts clean without a separate reset step. */
+        if (g_state.telegram.active_chat_id) {
+            if (!g_state.telegram.sent) {
                 const char *reply = chat_last_response_text();
                 if (reply && reply[0])
-                    tg_auto_reply(tg_active_chat_id, reply);
+                    tg_auto_reply(g_state.telegram.active_chat_id, reply);
             }
-            tg_active_chat_id = 0;
+            state_dispatch(&(action_t){.type = ACT_TG_TURN_COMPLETE});
         }
     }
 }
