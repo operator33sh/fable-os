@@ -1843,7 +1843,12 @@ static int instantiate(app_inst_t *in, int32_t x, int32_t y,
         wd->state |= d->state;
         if (d->align != 0xFF) wd->align = d->align;
         if (d->has_fg) wd->fg = d->fg;
-        if (d->has_bg) wd->bg = d->bg;
+        if (d->has_bg) {
+            wd->bg = d->bg;
+            /* An explicit bg on a label implies the caller wants it visible.
+             * GUI_W_OPAQUE is the flag the painter checks before filling. */
+            if (wd->kind == GUI_LABEL) wd->state |= GUI_W_OPAQUE;
+        }
     }
 
     /* A WIDGET A HANDLER IS BOUND TO MUST BE CLICKABLE. Labels and panels are
