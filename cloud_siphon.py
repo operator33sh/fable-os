@@ -267,12 +267,20 @@ _ATTACHMENT_RE = re.compile(
 )
 
 
-def _inject_images(ollama_messages):
-    """Scan Ollama messages for attachment markers and add base64 images.
+_MIME_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png",  ".gif": "image/gif",
+    ".webp": "image/webp",
+}
 
-    When tg_poll() includes a media file path in the sentence, this function
-    reads the file and attaches it as an Ollama vision `images` array so the
-    model can actually see the image rather than just read a file path.
+
+def _inject_images(ollama_messages):
+    """Scan Ollama messages for attachment markers and embed images as vision
+    content blocks.
+
+    Ollama (and compatible APIs) expect a content *array* for vision messages:
+      [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+       {"type": "text", "text": "..."}]
     """
     result = []
     for msg in ollama_messages:
@@ -286,12 +294,18 @@ def _inject_images(ollama_messages):
             continue
         file_path = match.group(1).strip()
         try:
+            ext      = os.path.splitext(file_path)[1].lower()
+            mime     = _MIME_TYPES.get(ext, "image/jpeg")
             with open(file_path, "rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
-            new_msg = dict(msg)
-            new_msg["images"] = [image_b64]
+            data_url  = f"data:{mime};base64,{image_b64}"
+            new_msg   = dict(msg)
+            new_msg["content"] = [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text",      "text":      content},
+            ]
             result.append(new_msg)
-            print(f"[Siphon] Vision: injected {file_path} into message")
+            print(f"[Siphon] Vision: injected {file_path} ({mime}) into message")
         except Exception as exc:
             print(f"[Siphon] Vision: could not inject {file_path}: {exc}")
             result.append(msg)
