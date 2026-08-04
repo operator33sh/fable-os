@@ -565,33 +565,43 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
                 raw_tools       = fable_req.get("tools", [])
                 requested_model = fable_req.get("model", "unknown")
 
-                ollama_messages = translate_messages_to_ollama(raw_messages)
-                ollama_messages = _inject_images(ollama_messages)
-                ollama_tools    = translate_tools_to_ollama(raw_tools)
+                ollama_messages        = translate_messages_to_ollama(raw_messages)
+                ollama_messages_vision = _inject_images(ollama_messages)
+                ollama_tools           = translate_tools_to_ollama(raw_tools)
+                has_images = any(m.get("images") for m in ollama_messages_vision)
 
-                ollama_payload = {
-                    "model":    OLLAMA_MODEL,
-                    "messages": ollama_messages,
-                    "stream":   False,
-                }
-                if ollama_tools:
-                    ollama_payload["tools"] = ollama_tools
+                def _call_ollama(messages):
+                    payload = {
+                        "model":    OLLAMA_MODEL,
+                        "messages": messages,
+                        "stream":   False,
+                    }
+                    if ollama_tools:
+                        payload["tools"] = ollama_tools
+                    return requests.post(
+                        f"{OLLAMA_BASE_URL}/api/chat",
+                        headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
+                        json=payload,
+                        timeout=60,
+                    )
 
                 print(f"\n[Siphon] >>> {requested_model} -> {OLLAMA_MODEL}"
-                      f"  tools={len(ollama_tools)}")
-                full_url = f"{OLLAMA_BASE_URL}/api/chat"
+                      f"  tools={len(ollama_tools)}"
+                      + (" +image" if has_images else ""))
 
-                response = requests.post(
-                    full_url,
-                    headers={"Authorization": f"Bearer {OLLAMA_API_KEY}"},
-                    json=ollama_payload,
-                    timeout=60
-                )
-
+                response = _call_ollama(ollama_messages_vision)
                 print(f"[Siphon] <<< HTTP {response.status_code}")
 
+                if response.status_code != 200 and has_images:
+                    # Model may not support vision — retry without images
+                    print(f"[Siphon] Vision attempt failed ({response.status_code}): "
+                          f"{response.text[:200]}")
+                    print("[Siphon] Retrying without images...")
+                    response = _call_ollama(ollama_messages)
+                    print(f"[Siphon] <<< HTTP {response.status_code} (text-only retry)")
+
                 if response.status_code != 200:
-                    print(f"[Siphon] Error: {response.text}")
+                    print(f"[Siphon] Ollama error: {response.text[:400]}")
                     self.send_response(response.status_code)
                     self.end_headers()
                     self.wfile.write(response.content)
