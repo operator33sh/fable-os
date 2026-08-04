@@ -5,6 +5,8 @@ import uuid
 import threading
 import time
 import os
+import re
+import base64
 import requests
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -257,6 +259,44 @@ def telegram_send_message(chat_id, text):
 # ======================================================================
 # Anthropic <-> Ollama translation helpers
 # ======================================================================
+
+# Matches the attachment marker inserted by tg_poll() in kernel/main.c:
+#   [attachment: photo saved at /tmp/telegram_media/xxx.jpg, caption: ...]
+_ATTACHMENT_RE = re.compile(
+    r'\[attachment: \w+ saved at (/tmp/telegram_media/[^,\]]+)'
+)
+
+
+def _inject_images(ollama_messages):
+    """Scan Ollama messages for attachment markers and add base64 images.
+
+    When tg_poll() includes a media file path in the sentence, this function
+    reads the file and attaches it as an Ollama vision `images` array so the
+    model can actually see the image rather than just read a file path.
+    """
+    result = []
+    for msg in ollama_messages:
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            result.append(msg)
+            continue
+        match = _ATTACHMENT_RE.search(content)
+        if not match:
+            result.append(msg)
+            continue
+        file_path = match.group(1).strip()
+        try:
+            with open(file_path, "rb") as fh:
+                image_b64 = base64.b64encode(fh.read()).decode("utf-8")
+            new_msg = dict(msg)
+            new_msg["images"] = [image_b64]
+            result.append(new_msg)
+            print(f"[Siphon] Vision: injected {file_path} into message")
+        except Exception as exc:
+            print(f"[Siphon] Vision: could not inject {file_path}: {exc}")
+            result.append(msg)
+    return result
+
 
 def translate_tools_to_ollama(tools):
     """
@@ -526,6 +566,7 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
                 requested_model = fable_req.get("model", "unknown")
 
                 ollama_messages = translate_messages_to_ollama(raw_messages)
+                ollama_messages = _inject_images(ollama_messages)
                 ollama_tools    = translate_tools_to_ollama(raw_tools)
 
                 ollama_payload = {
