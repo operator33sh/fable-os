@@ -274,10 +274,10 @@ static void put_format(tool_result_t *r) {
         "{\"set\":\"n\",\"to\":\"n + 1\"},"
         "{\"set\":\"out\",\"to\":\"text(n)\"}]}]}\n");
     tool_result_printf(r,
-        "kind: button label field panel checkbox; row/col or rect:[x,y,w,h]. "
+        "kind: button label field panel checkbox progress; row/col or rect:[x,y,w,h]. "
         "fg/bg:\"#RRGGBB\". "
         "name is unique and how a handler reaches it; tag is shared: "
-        "one/ten keys. Events: click, submit, tick(ms 50+). "
+        "one/ten. Events: click,submit,tick(ms 50+). "
         "Statements: "
         "{set,to} {if,then,else} {stop:true} {call,with,into}; no loops. "
         "{call} asks the KERNEL for a sound: app action=caps.\n"
@@ -663,7 +663,7 @@ static const tool_t app_tool = {
         "{\"title\":\"Hi\",\"width\":200,\"height\":90,"
         "\"grid\":{\"rows\":1,\"cols\":1},\"widgets\":[{\"kind\":\"label\","
         "\"text\":\"hello\",\"row\":0,\"col\":0}]} - that document works as-is. "
-        "kind: label button field panel checkbox, each with row+col; "
+        "kind: label button field panel checkbox progress, each with row+col; "
         "fg/bg:\"#RRGGBB\" set widget colour; add "
         "\"vars\" and \"on\":[{\"click\":\"<widget name>\",\"do\":[{\"set\":\"<name>\","
         "\"to\":\"<expression>\"}]}] for behaviour. Expressions also do chance "

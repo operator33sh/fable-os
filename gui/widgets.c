@@ -266,6 +266,18 @@ gui_widget_t *gui_add_checkbox(gui_window_t *win, gui_rect_t r,
     return w;
 }
 
+gui_widget_t *gui_add_progress(gui_window_t *win, gui_rect_t r,
+                               const char *initial, uint32_t id) {
+    gui_widget_t *w = alloc_widget(win, GUI_PROGRESS, r);
+    if (!w) return w;
+    w->id    = id;
+    w->fg    = theme->btn_bg_press;   /* fill colour */
+    w->bg    = theme->btn_edge;       /* track colour */
+    w->state = GUI_W_READONLY | GUI_W_NOHIT;
+    gui_set_text(w, (initial && initial[0]) ? initial : "0");
+    return w;
+}
+
 /* ====================================================================== */
 /* lookup                                                                 */
 /* ====================================================================== */
@@ -498,6 +510,23 @@ void gui_paint_widget(fb_surface_t *s, const gui_widget_t *w,
         fb_frame_rect(s, bx, by, boxsz, boxsz, 1, box_fg);
         if (w->text[0] == '1')
             fb_fill_rect(s, bx + 3, by + 3, boxsz - 6, boxsz - 6, box_fg);
+        break;
+    }
+
+    case GUI_PROGRESS: {
+        /* Track */
+        fb_fill_rect(s, r.x, r.y, r.w, r.h, w->bg);
+        fb_frame_rect(s, r.x, r.y, r.w, r.h, 1,
+                      disabled ? theme->btn_fg_disabled : w->fg);
+        /* Fill: parse integer 0-100 from text */
+        int pct = 0;
+        const char *p = w->text;
+        while (*p >= '0' && *p <= '9') pct = pct * 10 + (*p++ - '0');
+        if (pct > 100) pct = 100;
+        int32_t fw = (r.w * pct) / 100;
+        if (fw > 0)
+            fb_fill_rect(s, r.x, r.y, fw, r.h,
+                         disabled ? theme->btn_fg_disabled : w->fg);
         break;
     }
 

@@ -881,6 +881,7 @@ static int kind_of(const char *s, uint8_t *out) {
     if (a_eq(s, "field"))    { *out = GUI_FIELD;     return 1; }
     if (a_eq(s, "panel"))    { *out = GUI_PANEL;     return 1; }
     if (a_eq(s, "checkbox")) { *out = GUI_CHECKBOX;  return 1; }
+    if (a_eq(s, "progress")) { *out = GUI_PROGRESS;  return 1; }
     return 0;
 }
 
@@ -959,7 +960,7 @@ static int parse_widgets(app_inst_t *in, const json_value_t *root,
             pathf(kp, sizeof kp, "%s.kind", p);
             return rej(err, APP_EINVAL, kp,
                        "required, and must be one of: button, label, field, "
-                       "panel");
+                       "panel, checkbox, progress");
         }
 
         rc = f_str(&w, "text", d->text, sizeof d->text);
@@ -1835,6 +1836,8 @@ static int instantiate(app_inst_t *in, int32_t x, int32_t y,
                            break;
         case GUI_CHECKBOX: wd = gui_add_checkbox(win, r, d->text, (uint32_t)(i + 1));
                            break;
+        case GUI_PROGRESS: wd = gui_add_progress(win, r, d->text, (uint32_t)(i + 1));
+                           break;
         default:           wd = gui_add_panel(win, r, gui_theme()->client, d->state);
                            break;
         }
@@ -2082,11 +2085,13 @@ const char *app_last_error(uint32_t id) {
 
 static const char *kindname(uint8_t k) {
     switch (k) {
-    case GUI_PANEL:  return "panel";
-    case GUI_LABEL:  return "label";
-    case GUI_BUTTON: return "button";
-    case GUI_FIELD:  return "field";
-    default:         return "?";
+    case GUI_PANEL:    return "panel";
+    case GUI_LABEL:    return "label";
+    case GUI_BUTTON:   return "button";
+    case GUI_FIELD:    return "field";
+    case GUI_CHECKBOX: return "checkbox";
+    case GUI_PROGRESS: return "progress";
+    default:           return "?";
     }
 }
 

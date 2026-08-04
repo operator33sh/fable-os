@@ -197,6 +197,7 @@ gui_rect_t gui_center(gui_rect_t area, int32_t w, int32_t h);
 #define GUI_BUTTON   2
 #define GUI_FIELD    3
 #define GUI_CHECKBOX 4   /* tick-box; text="0"|"1" is the checked state       */
+#define GUI_PROGRESS 5   /* fill bar; text=integer 0-100 (percent filled)     */
 
 /* State bits. */
 #define GUI_W_DISABLED  0x01   /* greyed; ignores hits                        */
@@ -251,6 +252,11 @@ gui_widget_t *gui_add_field   (struct gui_window *win, gui_rect_t r,
 /* Tick-box. text="1" constructs checked, anything else unchecked.
  * w->text is "0" or "1" at all times — this is what expressions read. */
 gui_widget_t *gui_add_checkbox(struct gui_window *win, gui_rect_t r,
+                               const char *initial, uint32_t id);
+
+/* Fill bar. text=integer 0-100 (percent). Set via {"set":"bar","to":"75"}.
+ * Read-only and non-hittable by default. */
+gui_widget_t *gui_add_progress(struct gui_window *win, gui_rect_t r,
                                const char *initial, uint32_t id);
 
 /* ---- lookup ---- */
