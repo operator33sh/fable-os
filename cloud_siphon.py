@@ -267,13 +267,6 @@ _ATTACHMENT_RE = re.compile(
 )
 
 
-_MIME_TYPES = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".png": "image/png",  ".gif": "image/gif",
-    ".webp": "image/webp",
-}
-
-
 def _inject_images(ollama_messages):
     """Scan Ollama messages for attachment markers and embed images as vision
     content blocks.
@@ -294,18 +287,14 @@ def _inject_images(ollama_messages):
             continue
         file_path = match.group(1).strip()
         try:
-            ext      = os.path.splitext(file_path)[1].lower()
-            mime     = _MIME_TYPES.get(ext, "image/jpeg")
             with open(file_path, "rb") as fh:
                 image_b64 = base64.b64encode(fh.read()).decode("utf-8")
-            data_url  = f"data:{mime};base64,{image_b64}"
-            new_msg   = dict(msg)
-            new_msg["content"] = [
-                {"type": "image_url", "image_url": {"url": data_url}},
-                {"type": "text",      "text":      content},
-            ]
+            new_msg = dict(msg)
+            # Ollama native vision format: content stays a string,
+            # images is a list of raw base64 strings (no data-URL prefix).
+            new_msg["images"] = [image_b64]
             result.append(new_msg)
-            print(f"[Siphon] Vision: injected {file_path} ({mime}) into message")
+            print(f"[Siphon] Vision: injected {file_path} into message")
         except Exception as exc:
             print(f"[Siphon] Vision: could not inject {file_path}: {exc}")
             result.append(msg)
