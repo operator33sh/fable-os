@@ -421,16 +421,33 @@ static int tg_poll(char *buf, int cap) {
 
     json_value_t vchat, vfrom, vtext;
     int64_t chat_id = 0;
-    char from_name[64]  = "";
-    char text_buf[512]  = "";
+    char from_name[64]   = "";
+    char text_buf[512]   = "";
+    char media_type[16]  = "";
+    char media_path[256] = "";
+    char caption_buf[256] = "";
     size_t n = 0;
 
     if (json_get(&root, "chat_id", &vchat) == JSON_OK)
         json_int(&vchat, &chat_id);
     if (json_get(&root, "from", &vfrom) == JSON_OK)
         json_str(&vfrom, from_name, sizeof from_name, &n);
-    if (json_get(&root, "text", &vtext) == JSON_OK)
+    if (json_get(&root, "text", &vtext) == JSON_OK) {
+        n = 0;
         json_str(&vtext, text_buf, sizeof text_buf, &n);
+    }
+    {
+        json_value_t v;
+        n = 0;
+        if (json_get(&root, "media_type", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, media_type, sizeof media_type, &n);
+        n = 0;
+        if (json_get(&root, "media_path", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, media_path, sizeof media_path, &n);
+        n = 0;
+        if (json_get(&root, "caption", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, caption_buf, sizeof caption_buf, &n);
+    }
 
     {
         action_t act;
@@ -440,10 +457,22 @@ static int tg_poll(char *buf, int cap) {
         state_dispatch(&act);
     }
 
-    int written = snprintf(buf, (size_t)cap,
-        "[Telegram from %s, chat_id=%ld] %s",
-        from_name[0] ? from_name : "unknown",
-        (long)chat_id, text_buf);
+    int written;
+    if (media_type[0]) {
+        written = snprintf(buf, (size_t)cap,
+            "[Telegram from %s, chat_id=%ld]%s%s"
+            " [attachment: %s saved at %s, caption: %s]",
+            from_name[0] ? from_name : "unknown",
+            (long)chat_id,
+            text_buf[0] ? " " : "", text_buf,
+            media_type, media_path,
+            caption_buf[0] ? caption_buf : "(none)");
+    } else {
+        written = snprintf(buf, (size_t)cap,
+            "[Telegram from %s, chat_id=%ld] %s",
+            from_name[0] ? from_name : "unknown",
+            (long)chat_id, text_buf);
+    }
     if (written <= 0 || written >= cap) {
         state_dispatch(&(action_t){.type = ACT_TG_TURN_COMPLETE});
         return 0;

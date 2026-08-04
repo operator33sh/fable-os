@@ -41,6 +41,10 @@ KEY_FILE        = "/home/wouter/Development/fable-os/key.pem"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _raw_ids = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
 TELEGRAM_ALLOWED_CHAT_IDS = [int(x.strip()) for x in _raw_ids.split(",") if x.strip()]
+
+# Local directory where incoming Telegram media files are saved.
+MEDIA_DIR = "/tmp/telegram_media"
+os.makedirs(MEDIA_DIR, exist_ok=True)
 # ---------------------
 
 # ======================================================================
@@ -79,9 +83,8 @@ def telegram_poller():
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message", {})
-                text = msg.get("text", "").strip()
-                if not text:
-                    continue
+                text    = msg.get("text", "").strip()
+                caption = msg.get("caption", "").strip()
 
                 chat_id   = msg["chat"]["id"]
                 from_name = msg.get("from", {}).get("first_name", "?")
@@ -91,13 +94,43 @@ def telegram_poller():
                     print(f"[Siphon/Telegram] Ignored message from unlisted chat {chat_id}")
                     continue
 
+                # Detect and download media (photo or document)
+                media_path = None
+                media_type = None
+
+                if "photo" in msg:
+                    photo = msg["photo"][-1]   # largest available size
+                    local = telegram_download_file(
+                        photo["file_id"], photo["file_unique_id"], ".jpg")
+                    if local:
+                        media_path = local
+                        media_type = "photo"
+                        print(f"[Siphon/Telegram] Photo saved to {local}")
+                elif "document" in msg:
+                    doc = msg["document"]
+                    ext = os.path.splitext(doc.get("file_name", "file"))[1] or ".bin"
+                    local = telegram_download_file(
+                        doc["file_id"], doc["file_unique_id"], ext)
+                    if local:
+                        media_path = local
+                        media_type = "document"
+                        print(f"[Siphon/Telegram] Document saved to {local}")
+
+                # Skip if there is neither text nor media
+                if not text and not media_path:
+                    continue
+
                 with telegram_lock:
                     telegram_queue.append({
-                        "chat_id": chat_id,
-                        "from":    from_name,
-                        "text":    text,
+                        "chat_id":    chat_id,
+                        "from":       from_name,
+                        "text":       text,
+                        "media_type": media_type,
+                        "media_path": media_path,
+                        "caption":    caption,
                     })
-                print(f"[Siphon/Telegram] Queued message from {from_name} (chat {chat_id}): {text[:60]}")
+                print(f"[Siphon/Telegram] Queued message from {from_name} (chat {chat_id}): {text[:60]}"
+                      + (f" [+{media_type}]" if media_type else ""))
 
         except Exception as e:
             print(f"[Siphon/Telegram] Poller error: {e}")
@@ -152,6 +185,58 @@ def stop_typing(chat_id):
         ev = typing_stop.pop(chat_id, None)
     if ev:
         ev.set()
+
+
+def telegram_download_file(file_id, file_unique_id, file_ext):
+    """Download a Telegram file to MEDIA_DIR. Returns local path or None."""
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10)
+        data = resp.json()
+        if not data.get("ok"):
+            print(f"[Siphon/Telegram] getFile error: {data.get('description')}")
+            return None
+        remote_path = data["result"]["file_path"]
+        dl_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{remote_path}"
+        file_resp = requests.get(dl_url, timeout=30)
+        file_resp.raise_for_status()
+        local_path = os.path.join(MEDIA_DIR, f"{file_unique_id}{file_ext}")
+        with open(local_path, "wb") as f:
+            f.write(file_resp.content)
+        return local_path
+    except Exception as e:
+        print(f"[Siphon/Telegram] File download error: {e}")
+        return None
+
+
+def telegram_send_media_file(chat_id, file_path, caption):
+    """Upload a local file to Telegram via sendPhoto or sendDocument.
+    Returns (ok, error_str)."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False, "TELEGRAM_BOT_TOKEN not configured"
+    try:
+        ext    = os.path.splitext(file_path)[1].lower()
+        is_photo = ext in (".jpg", ".jpeg", ".png", ".gif", ".webp")
+        method = "sendPhoto" if is_photo else "sendDocument"
+        field  = "photo"    if is_photo else "document"
+        url    = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+        with open(file_path, "rb") as fh:
+            resp = requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption},
+                files={field: fh},
+                timeout=30)
+        data = resp.json()
+        if data.get("ok"):
+            return True, None
+        return False, data.get("description", "unknown error")
+    except FileNotFoundError:
+        return False, f"file not found: {file_path}"
+    except Exception as e:
+        return False, str(e)
 
 
 def telegram_send_message(chat_id, text):
@@ -333,7 +418,12 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
                         "from":    msg["from"],
                         "text":    msg["text"],
                     }
-                    print(f"[Siphon/poll] Delivering message from chat {msg['chat_id']}")
+                    if msg.get("media_path"):
+                        payload["media_type"] = msg["media_type"]
+                        payload["media_path"] = msg["media_path"]
+                        payload["caption"]    = msg.get("caption", "")
+                    print(f"[Siphon/poll] Delivering message from chat {msg['chat_id']}"
+                          + (f" [+{msg.get('media_type')}]" if msg.get("media_type") else ""))
                     start_typing(msg["chat_id"])
                 else:
                     payload = {"pending": False}
@@ -386,6 +476,42 @@ class CloudSiphonHandler(BaseHTTPRequestHandler):
 
             except Exception as e:
                 print(f"[Siphon/send] Error: {e}")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+            return
+
+        # ---- Telegram send_media ----------------------------------
+        if self.path == "/v1/telegram/send_media":
+            try:
+                req       = json.loads(post_data)
+                chat_id   = req.get("chat_id")
+                file_path = req.get("file_path", "")
+                caption   = req.get("caption", "")
+
+                if chat_id is None or not file_path:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b'{"error":"chat_id and file_path required"}')
+                    return
+
+                stop_typing(int(chat_id))
+                ok, err = telegram_send_media_file(int(chat_id), file_path, caption)
+                if ok:
+                    body = json.dumps({"ok": True}).encode("utf-8")
+                    self.send_response(200)
+                else:
+                    body = json.dumps({"ok": False, "error": err}).encode("utf-8")
+                    self.send_response(500)
+
+                print(f"[Siphon/send_media] chat_id={chat_id} file={file_path} ok={ok}"
+                      + (f" err={err}" if not ok else ""))
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as e:
+                print(f"[Siphon/send_media] Error: {e}")
                 self.send_response(500)
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))

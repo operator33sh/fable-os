@@ -49,8 +49,9 @@
 #include <stdio.h>
 
 /* The CloudSiphon bridge on the QEMU host. */
-#define BRIDGE_POLL  "https://10.0.2.2/v1/telegram/poll"
-#define BRIDGE_SEND  "https://10.0.2.2/v1/telegram/send"
+#define BRIDGE_POLL       "https://10.0.2.2/v1/telegram/poll"
+#define BRIDGE_SEND       "https://10.0.2.2/v1/telegram/send"
+#define BRIDGE_SEND_MEDIA "https://10.0.2.2/v1/telegram/send_media"
 
 /* Forward declaration — defined in the "JSON string encoder" section below. */
 static int json_string_encode(char *buf, size_t cap, const char *s);
@@ -248,7 +249,7 @@ static int t_telegram_poll(const tool_call_t *call, tool_result_t *r) {
     json_value_t vchat, vfrom, vtext;
     int64_t chat_id = 0;
     char from_name[128] = {0};
-    char text_buf[1024]  = {0};
+    char text_buf[1024] = {0};
 
     if (json_get(&root, "chat_id", &vchat) == JSON_OK &&
         vchat.type == JSON_NUMBER) {
@@ -265,6 +266,24 @@ static int t_telegram_poll(const tool_call_t *call, tool_result_t *r) {
         json_str(&vtext, text_buf, sizeof text_buf, &n);
     }
 
+    /* Optional media fields — present when the message included a photo or
+     * document that the bridge has already downloaded to its local disk. */
+    char media_type[16]  = {0};
+    char media_path[512] = {0};
+    char caption_buf[512] = {0};
+    {
+        json_value_t v;
+        size_t n = 0;
+        if (json_get(&root, "media_type", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, media_type, sizeof media_type, &n);
+        n = 0;
+        if (json_get(&root, "media_path", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, media_path, sizeof media_path, &n);
+        n = 0;
+        if (json_get(&root, "caption", &v) == JSON_OK && v.type == JSON_STRING)
+            json_str(&v, caption_buf, sizeof caption_buf, &n);
+    }
+
     tool_result_printf(r,
         "pending: true\n"
         "chat_id: %ld\n"
@@ -273,6 +292,16 @@ static int t_telegram_poll(const tool_call_t *call, tool_result_t *r) {
         (long)chat_id,
         from_name[0] ? from_name : "(unknown)",
         text_buf);
+
+    if (media_type[0]) {
+        tool_result_printf(r,
+            "media_type: %s\n"
+            "media_path: %s\n"
+            "caption:    %s\n",
+            media_type,
+            media_path[0] ? media_path : "(unavailable)",
+            caption_buf[0] ? caption_buf : "(none)");
+    }
 
     return TOOL_OK;
 }
@@ -398,3 +427,125 @@ static const tool_t telegram_send_tool = {
     .invoke = t_telegram_send,
 };
 REGISTER_TOOL(telegram_send_tool);
+
+/* ====================================================================== */
+/* telegram_send_media                                                      */
+/* ====================================================================== */
+
+static char tg_media_body[FETCH_BODY_MAX + 1];
+static char tg_media_path_arg[512];
+static char tg_media_caption_arg[512];
+
+static int t_telegram_send_media(const tool_call_t *call, tool_result_t *r) {
+    char         err[160];
+    json_value_t root;
+    if (tg_arg_root(call, &root, err, sizeof err) != 0) {
+        r->is_error = 1;
+        tool_result_printf(r, "%s\n", err);
+        return TOOL_OK;
+    }
+
+    int64_t chat_id = 0;
+    if (tg_arg_int(&root, "chat_id",
+                   -999999999999LL, 999999999999LL,
+                   &chat_id, err, sizeof err) != 0) {
+        r->is_error = 1;
+        tool_result_printf(r, "%s\n", err);
+        return TOOL_OK;
+    }
+
+    if (tg_arg_str(&root, "file_path",
+                   tg_media_path_arg, sizeof tg_media_path_arg,
+                   err, sizeof err) <= 0 || !tg_media_path_arg[0]) {
+        r->is_error = 1;
+        tool_result_printf(r, "\"file_path\" is required (path on the bridge host, "
+                              "e.g. from media_path in telegram_poll)\n");
+        return TOOL_OK;
+    }
+
+    /* caption is optional */
+    tg_media_caption_arg[0] = '\0';
+    tg_arg_str(&root, "caption",
+               tg_media_caption_arg, sizeof tg_media_caption_arg,
+               err, sizeof err);
+
+    char path_json[sizeof tg_media_path_arg * 2 + 4];
+    char cap_json[sizeof tg_media_caption_arg * 2 + 4];
+    if (json_string_encode(path_json, sizeof path_json, tg_media_path_arg) < 0 ||
+        json_string_encode(cap_json,  sizeof cap_json,  tg_media_caption_arg) < 0) {
+        r->is_error = 1;
+        tool_result_printf(r, "path or caption too long to encode\n");
+        return TOOL_OK;
+    }
+
+    int blen = snprintf(tg_media_body, sizeof tg_media_body,
+                        "{\"chat_id\":%ld,\"file_path\":%s,\"caption\":%s}",
+                        (long)chat_id, path_json, cap_json);
+    if (blen < 0 || (size_t)blen >= sizeof tg_media_body) {
+        r->is_error = 1;
+        tool_result_printf(r, "request body overflow\n");
+        return TOOL_OK;
+    }
+
+    fetch_options_t opt;
+    memset(&opt, 0, sizeof opt);
+    opt.method       = "POST";
+    opt.body         = tg_media_body;
+    opt.body_len     = (size_t)blen;
+    opt.content_type = "application/json";
+    opt.timeout_ms   = 30000;   /* upload may be slow */
+
+    fetch_result_t fr;
+    const char    *why = (const char *)0;
+    int rc = fetch(BRIDGE_SEND_MEDIA, sizeof BRIDGE_SEND_MEDIA - 1,
+                   &opt, tg_rx, sizeof tg_rx, &fr, &why);
+
+    if (rc != FETCH_OK) {
+        r->is_error = 1;
+        tool_result_printf(r, "could not reach bridge: %s\n",
+                           why ? why : fetch_strerror(rc));
+        return TOOL_OK;
+    }
+    if (fr.http_status != 200) {
+        r->is_error = 1;
+        tool_result_printf(r, "bridge returned HTTP %d\n", fr.http_status);
+        return TOOL_OK;
+    }
+
+    state_dispatch(&(action_t){.type = ACT_TG_SENT});
+    tool_result_printf(r, "media sent to chat_id %ld\n", (long)chat_id);
+    return TOOL_OK;
+}
+
+static const tool_t telegram_send_media_tool = {
+    .name        = "telegram_send_media",
+    .description =
+        "Send a photo or document to a Telegram chat by providing a file "
+        "path that the bridge can read (e.g. the media_path from "
+        "telegram_poll). The bridge determines whether to use sendPhoto or "
+        "sendDocument based on the file extension. An optional caption may "
+        "accompany the file.",
+    .input_schema =
+        "{"
+          "\"type\":\"object\","
+          "\"properties\":{"
+            "\"chat_id\":{"
+              "\"type\":\"integer\","
+              "\"description\":\"Telegram chat ID, as returned by telegram_poll\""
+            "},"
+            "\"file_path\":{"
+              "\"type\":\"string\","
+              "\"description\":\"Absolute path on the bridge host to the file "
+                "to send (e.g. /tmp/telegram_media/xyz.jpg)\""
+            "},"
+            "\"caption\":{"
+              "\"type\":\"string\","
+              "\"description\":\"Optional caption shown below the media\""
+            "}"
+          "},"
+          "\"required\":[\"chat_id\",\"file_path\"]"
+        "}",
+    .flags  = TOOL_MUTATES,
+    .invoke = t_telegram_send_media,
+};
+REGISTER_TOOL(telegram_send_media_tool);
