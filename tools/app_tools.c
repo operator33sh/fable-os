@@ -275,8 +275,9 @@ static void put_format(tool_result_t *r) {
         "{\"set\":\"out\",\"to\":\"text(n)\"}]}]}\n");
     tool_result_printf(r,
         "kind: button label field panel; row/col or rect:[x,y,w,h]. "
+        "fg/bg:\"#RRGGBB\". "
         "name is unique and how a handler reaches it; tag is shared: "
-        "one handler serves ten keys. Events: click, submit, tick(ms 50+). "
+        "one handler, ten keys. Events: click, submit, tick(ms 50+). "
         "Statements: "
         "{set,to} {if,then,else} {stop:true} {call,with,into}; no loops. "
         "{call} asks the KERNEL for a sound: app action=caps.\n"
