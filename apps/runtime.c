@@ -406,14 +406,17 @@ static int check_keys(const json_value_t *obj, const char *path,
 /* ====================================================================== */
 
 typedef struct {
-    uint8_t  kind;
-    uint8_t  align;
-    uint8_t  state;
-    uint8_t  use_rect;
-    int32_t  row, col, rowspan, colspan;
-    int32_t  rect[4];
-    char     text[APP_TEXT_MAX];
-    char     tag[APP_NAME_MAX];
+    uint8_t    kind;
+    uint8_t    align;
+    uint8_t    state;
+    uint8_t    use_rect;
+    uint8_t    has_fg;      /* "fg" was given in the document                  */
+    uint8_t    has_bg;      /* "bg" was given in the document                  */
+    int32_t    row, col, rowspan, colspan;
+    int32_t    rect[4];
+    fb_color_t fg, bg;
+    char       text[APP_TEXT_MAX];
+    char       tag[APP_NAME_MAX];
 } wdesc_t;
 
 /* One launch at a time: this kernel has one thread, app_launch() is only reached
@@ -675,24 +678,51 @@ static int compile_stmt(app_inst_t *in, const json_value_t *st,
     }
 
     if (has_set) {
-        char target[APP_NAME_MAX];
+        char target[APP_NAME_MAX + 4];  /* +4 to accommodate ".fg" / ".bg" suffixes */
         char p[72];
         int  rc = f_str(st, "set", target, sizeof target);
         pathf(p, sizeof p, "%s.set", path);
         if (rc == 0 || rc == -1)
             return rej(err, APP_EINVAL, p,
-                       "must be the name of a var or of a widget to assign to");
+                       "must be the name of a var or of a widget to assign to, "
+                       "optionally with \".fg\" or \".bg\" to set its colour");
         if (rc == -2)
             return rej(err, APP_EINVAL, p,
-                       "name is longer than %d bytes", APP_NAME_MAX - 1);
+                       "name is longer than %d bytes", (int)(sizeof target) - 1);
         if (rc == -3)
             return rej(err, APP_EINVAL, p, "contains an embedded NUL character");
 
         out->kind = AS_SET;
-        if (!resolve_target(in, target, &out->tgt_kind, &out->tgt))
-            return rej(err, APP_EINVAL, p,
-                       "\"%s\" is not a var or a named widget. Declare it in "
-                       "\"vars\", or give the widget you mean a \"name\"", target);
+
+        /* Dotted property target: "widgetname.fg" or "widgetname.bg" */
+        size_t tlen  = a_len(target);
+        int    is_fg = tlen > 3 && a_eq(target + tlen - 3, ".fg");
+        int    is_bg = !is_fg && tlen > 3 && a_eq(target + tlen - 3, ".bg");
+        if (is_fg || is_bg) {
+            char   wname[APP_NAME_MAX];
+            size_t nlen = tlen - 3;
+            if (nlen >= APP_NAME_MAX)
+                return rej(err, APP_EINVAL, p,
+                           "widget name part is longer than %d bytes",
+                           APP_NAME_MAX - 1);
+            for (size_t j = 0; j < nlen; j++) wname[j] = target[j];
+            wname[nlen] = '\0';
+            uint8_t  wkind = 0;
+            uint16_t widx  = 0;
+            if (!resolve_target(in, wname, &wkind, &widx) ||
+                wkind != AT_WIDGET)
+                return rej(err, APP_EINVAL, p,
+                           "\"%s\" is not a named widget — only widgets "
+                           "have .fg / .bg colour targets", wname);
+            out->tgt_kind = is_fg ? AT_WIDGET_FG : AT_WIDGET_BG;
+            out->tgt      = widx;
+        } else {
+            if (!resolve_target(in, target, &out->tgt_kind, &out->tgt))
+                return rej(err, APP_EINVAL, p,
+                           "\"%s\" is not a var or a named widget. Declare it in "
+                           "\"vars\", or give the widget you mean a \"name\"",
+                           target);
+        }
 
         return compile_expr_field(in, st, "to", path, &out->expr, err);
     }
@@ -853,6 +883,24 @@ static int kind_of(const char *s, uint8_t *out) {
     return 0;
 }
 
+/* Parse a "#RRGGBB" colour literal into an fb_color_t (0x00RRGGBB).
+ * Returns 1 on success, 0 if the string is not exactly "#" + 6 hex digits. */
+static int parse_color(const char *s, fb_color_t *out) {
+    if (!s || s[0] != '#' || s[7] != '\0') return 0;
+    uint32_t v = 0;
+    for (int i = 1; i <= 6; i++) {
+        char c = s[i];
+        uint32_t d;
+        if      (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+        else return 0;
+        v = (v << 4) | d;
+    }
+    *out = (fb_color_t)v;
+    return 1;
+}
+
 static int align_of(const char *s, uint8_t *out) {
     if (a_eq(s, "left"))   { *out = GUI_ALIGN_LEFT;   return 1; }
     if (a_eq(s, "center") || a_eq(s, "centre")) { *out = GUI_ALIGN_CENTER; return 1; }
@@ -886,7 +934,7 @@ static int parse_widgets(app_inst_t *in, const json_value_t *root,
 
         static const char *const wkeys[] = {
             "kind", "text", "name", "tag", "align", "readonly", "disabled",
-            "border", "rect", "row", "col", "rowspan", "colspan", 0
+            "border", "rect", "row", "col", "rowspan", "colspan", "fg", "bg", 0
         };
 
         pathf(p, sizeof p, "widgets[%d]", (int)i);
@@ -1003,6 +1051,35 @@ static int parse_widgets(app_inst_t *in, const json_value_t *root,
         if (f_bool(&w, "border", &flag) < 0)
             return rej(err, APP_EINVAL, p, "\"border\" must be a boolean");
         if (flag) d->state |= GUI_W_BORDER;
+
+        /* Initial colours. Optional; theme defaults apply when absent. */
+        char colbuf[8];
+        rc = f_str(&w, "fg", colbuf, sizeof colbuf);
+        if (rc == 1) {
+            char fp[72];
+            pathf(fp, sizeof fp, "%s.fg", p);
+            if (!parse_color(colbuf, &d->fg))
+                return rej(err, APP_EINVAL, fp,
+                           "must be a CSS hex colour like \"#RRGGBB\"");
+            d->has_fg = 1;
+        } else if (rc < 0) {
+            char fp[72];
+            pathf(fp, sizeof fp, "%s.fg", p);
+            return rej(err, APP_EINVAL, fp, "must be a string like \"#RRGGBB\"");
+        }
+        rc = f_str(&w, "bg", colbuf, sizeof colbuf);
+        if (rc == 1) {
+            char bp[72];
+            pathf(bp, sizeof bp, "%s.bg", p);
+            if (!parse_color(colbuf, &d->bg))
+                return rej(err, APP_EINVAL, bp,
+                           "must be a CSS hex colour like \"#RRGGBB\"");
+            d->has_bg = 1;
+        } else if (rc < 0) {
+            char bp[72];
+            pathf(bp, sizeof bp, "%s.bg", p);
+            return rej(err, APP_EINVAL, bp, "must be a string like \"#RRGGBB\"");
+        }
 
         /* Placement: an explicit rect, or a grid cell. */
         json_value_t r;
@@ -1277,6 +1354,18 @@ static void put_value(app_inst_t *in, gui_window_t *win, uint8_t tgt_kind,
                       uint16_t tgt, const app_val_t *v) {
     if (tgt_kind == AT_VAR) {
         if (tgt < in->nvar) in->var[tgt] = *v;
+        return;
+    }
+    if (tgt_kind == AT_WIDGET_FG || tgt_kind == AT_WIDGET_BG) {
+        if (!win || tgt >= win->nwidgets) return;
+        char       colbuf[8];
+        fb_color_t col = 0;
+        app_val_text(v, colbuf, sizeof colbuf);
+        if (!parse_color(colbuf, &col)) return; /* silently ignore invalid colours */
+        gui_widget_t *cw = &win->widgets[tgt];
+        if (tgt_kind == AT_WIDGET_FG) cw->fg = col;
+        else                          cw->bg = col;
+        gui_invalidate_widget(win->id, cw);
         return;
     }
     if (!win || tgt >= win->nwidgets) return;
@@ -1753,6 +1842,8 @@ static int instantiate(app_inst_t *in, int32_t x, int32_t y,
         wd->id = (uint32_t)(i + 1);
         wd->state |= d->state;
         if (d->align != 0xFF) wd->align = d->align;
+        if (d->has_fg) wd->fg = d->fg;
+        if (d->has_bg) wd->bg = d->bg;
     }
 
     /* A WIDGET A HANDLER IS BOUND TO MUST BE CLICKABLE. Labels and panels are

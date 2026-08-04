@@ -91,14 +91,14 @@
  *     "guess the number", random picker           — needed RANDOMNESS
  *     tip / BMI / converter, shown to 2 decimals  — needed ROUNDING
  *     password, picking a character out of a set  — needed at()
- *     colour picker, progress bar, traffic light  — STILL MISSING: a widget
- *                                                   whose colour an app can set
+ *     colour picker, progress bar, traffic light  — set "name.fg"/"name.bg" in
+ *                                                   a handler to change colours
  *     todo list you can delete from, any list     — STILL MISSING: a list widget
  *
  *   So five additions, each of which unlocks a family rather than one app:
  *   a "tick" event, `now`, the wall clock, `rand()`, `at()` and `round()`. The
- *   two that are still missing both need a widget gui.h does not have yet, and
- *   neither is a language question.
+ *   list widget is still missing and needs new gui.h support; colour control
+ *   is now a language feature (see "fg"/"bg" in widget keys and set syntax).
  *
  *   NONE OF THEM MAKES THIS A PROGRAMMING LANGUAGE, and that is the constraint
  *   they were designed against — a declarative document has to stay cheap to
@@ -291,6 +291,13 @@
  *              explicit "rect":[x,y,w,h] in client pixels. `name` is a unique
  *              handle; `tag` groups widgets so one handler serves ten digits.
  *              Optional flags: readonly, disabled, border, align.
+ *              Optional colours: "fg":"#RRGGBB", "bg":"#RRGGBB" — CSS hex, six
+ *              digits. These set the initial foreground and background colour of
+ *              the widget, overriding the theme default. A handler may change
+ *              them at runtime with {"set":"name.fg","to":"'#RRGGBB'"} or
+ *              {"set":"name.bg","to":"'#RRGGBB'"}. An invalid colour string is
+ *              silently ignored at runtime (the widget keeps its current colour)
+ *              and rejected with an error at compile time.
  *
  *              TWO RULES THE RUNTIME APPLIES ON THE APP'S BEHALF, both because
  *              the alternative is an app that looks right and misbehaves:

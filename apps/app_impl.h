@@ -120,12 +120,14 @@ typedef struct app_expr {
 #define AS_STOP  2
 #define AS_CALL  3
 
-#define AT_VAR     0
-#define AT_WIDGET  1
+#define AT_VAR        0
+#define AT_WIDGET     1
+#define AT_WIDGET_FG  2     /* set "name.fg" — changes the widget's fg colour */
+#define AT_WIDGET_BG  3     /* set "name.bg" — changes the widget's bg colour */
 
 typedef struct app_stmt {
     uint8_t  kind;
-    uint8_t  tgt_kind;      /* AS_SET: AT_VAR or AT_WIDGET                  */
+    uint8_t  tgt_kind;      /* AS_SET: AT_VAR, AT_WIDGET, AT_WIDGET_FG, or AT_WIDGET_BG */
     uint16_t tgt;           /* AS_SET: var or widget index;                 */
                             /* AS_CALL: index into inst->call[]             */
     uint16_t expr;          /* AS_SET / AS_IF: expression index             */
