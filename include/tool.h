@@ -104,13 +104,20 @@ typedef struct tool_result {
 } tool_result_t;
 
 /* A registered tool. `input_schema` is a JSON Schema object, verbatim, as the
- * API's tool definition expects. */
+ * API's tool definition expects.
+ *
+ * `functions` is an optional NULL-terminated array of strings naming every
+ * sub-function (action) this tool exposes.  Single-function tools leave it
+ * NULL — the tool name itself is the function.  Multi-action tools (app,
+ * gui_window, …) list every valid "action" value here so the caller does not
+ * have to parse the description or the schema enum to discover them. */
 typedef struct tool {
-    const char *name;
-    const char *description;
-    const char *input_schema;
-    uint32_t    flags;
-    int       (*invoke)(const tool_call_t *call, tool_result_t *out);
+    const char  *name;
+    const char  *description;
+    const char  *input_schema;
+    uint32_t     flags;
+    int        (*invoke)(const tool_call_t *call, tool_result_t *out);
+    const char **functions;   /* NULL-terminated list of action names, or NULL */
 } tool_t;
 
 /* Place a pointer to the tool in the "tool_table" section. KEEP() in the linker

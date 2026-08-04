@@ -962,8 +962,13 @@ static int t_fault_recover(const tool_call_t *call, tool_result_t *r) {
     return TOOL_OK;
 }
 
+static const char *const fault_recover_functions[] = {
+    "skip", "set_register", "set_rip", "refuse", "none", NULL
+};
+
 static const tool_t fault_recover_tool = {
     .name        = "fault_recover",
+    .functions   = fault_recover_functions,
     .description =
         "Arm what this machine should do the NEXT time it takes a fatal CPU "
         "exception, instead of printing a report and halting. An exception handler "
@@ -1322,8 +1327,13 @@ static int t_fault_patch(const tool_call_t *call, tool_result_t *r) {
     return TOOL_OK;
 }
 
+static const char *const fault_patch_functions[] = {
+    "apply", "revert", "revert_all", "list", NULL
+};
+
 static const tool_t fault_patch_tool = {
     .name        = "fault_patch",
+    .functions   = fault_patch_functions,
     .description =
         "Rewrite instructions in this running kernel's .text, and undo it. "
         "Every page here is RWX, so a function is a byte string that can be "

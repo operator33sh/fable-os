@@ -179,6 +179,15 @@ size_t tools_build_schema(char *dst, size_t cap) {
         /* Validated as a JSON object by tool_usable() — insert verbatim. */
         sput(&s, ",\"input_schema\":");
         sput(&s, t->input_schema);
+        if (t->functions) {
+            sput(&s, ",\"functions\":[");
+            int fi = 0;
+            for (const char *const *fn = t->functions; *fn; fn++) {
+                if (fi++) sput_char(&s, ',');
+                sput_json_string(&s, *fn);
+            }
+            sput_char(&s, ']');
+        }
         sput_char(&s, '}');
     }
     sput_char(&s, ']');

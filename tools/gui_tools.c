@@ -536,8 +536,13 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
     return TOOL_OK;
 }
 
+static const char *const gui_window_functions[] = {
+    "focus", "raise", "move", "resize", "hide", "show", "close", NULL
+};
+
 static const tool_t gui_window_tool = {
-    .name = "gui_window",
+    .name      = "gui_window",
+    .functions = gui_window_functions,
     .description =
         "Act on one window: focus (which also raises it), raise, move, resize, "
         "hide, show, or close. Ids come from gui_list. Pixel values are clamped "

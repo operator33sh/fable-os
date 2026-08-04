@@ -449,6 +449,28 @@ static int do_launch(const json_value_t *in, tool_result_t *r) {
         }
     }
 
+    /* Close any running app with the same title before launching so the model
+     * gets a reload in place, not a second window next to the old one.
+     * Collect matching ids first; app_close may compact the instance pool. */
+    {
+        json_value_t new_doc;
+        char new_title[128] = {0};
+        if (json_parse(text, len, &new_doc) == JSON_OK)
+            f_str(&new_doc, "title", new_title, sizeof new_title);
+        if (new_title[0]) {
+            uint32_t to_close[16];
+            int      nclose = 0;
+            int      n = app_count();
+            for (int i = 0; i < n && nclose < 16; i++) {
+                uint32_t wid = app_at(i);
+                if (streq(app_title(wid), new_title))
+                    to_close[nclose++] = wid;
+            }
+            for (int i = 0; i < nclose; i++)
+                app_close(to_close[i]);
+        }
+    }
+
     uint32_t    id = 0;
     app_error_t e;
     int rc = app_launch(text, len,
@@ -652,8 +674,13 @@ static int t_app(const tool_call_t *c, tool_result_t *r) {
  * and it is spent from schema headroom that has 6 KiB spare. If you find a
  * fourth mistake in a transcript, put it here rather than in action=format:
  * these bytes are read before the first attempt, and that text is not. */
+static const char *const app_functions[] = {
+    "format", "caps", "launch", "list", "state", "close", NULL
+};
+
 static const tool_t app_tool = {
-    .name = "app",
+    .name      = "app",
+    .functions = app_functions,
     .description =
         "Build a graphical app from a JSON document you write and run it in a "
         "real window. THIS IS THE ANSWER TO \"I want <anything>\" - a "

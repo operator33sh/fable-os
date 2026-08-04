@@ -484,8 +484,13 @@ static int t_agenda_control(const tool_call_t *call, tool_result_t *r) {
     return TOOL_OK;
 }
 
+static const char *const agenda_control_functions[] = {
+    "delete", "enable", "disable", "run_now", "all_on", "all_off", NULL
+};
+
 static const tool_t agenda_control_tool = {
     .name        = "agenda_control",
+    .functions   = agenda_control_functions,
     .description =
         "Change or test one scheduled agenda item: \"delete\", \"enable\", "
         "\"disable\", or \"run_now\" to run it immediately through exactly the "
