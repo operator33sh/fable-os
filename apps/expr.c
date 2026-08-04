@@ -213,19 +213,31 @@ int app_val_truthy(const app_val_t *v) {
 /* ====================================================================== */
 
 static const struct { const char *name; uint8_t op; uint8_t arity; } fns[] = {
-    { "num",    AO_NUM,    1 },
-    { "text",   AO_TEXT,   1 },
-    { "cat",    AO_CAT,    2 },
-    { "len",    AO_LEN,    1 },
-    { "digits", AO_DIGITS, 1 },
-    { "has",    AO_HAS,    2 },
-    { "iserr",  AO_ISERR,  1 },
-    { "abs",    AO_ABS,    1 },
-    { "min",    AO_MIN,    2 },
-    { "max",    AO_MAX,    2 },
-    { "round",  AO_ROUND,  1 },
-    { "rand",   AO_RAND,   1 },
-    { "at",     AO_AT,     2 },
+    { "num",     AO_NUM,     1 },
+    { "text",    AO_TEXT,    1 },
+    { "cat",     AO_CAT,     2 },
+    { "len",     AO_LEN,     1 },
+    { "digits",  AO_DIGITS,  1 },
+    { "has",     AO_HAS,     2 },
+    { "iserr",   AO_ISERR,   1 },
+    { "abs",     AO_ABS,     1 },
+    { "min",     AO_MIN,     2 },
+    { "max",     AO_MAX,     2 },
+    { "round",   AO_ROUND,   1 },
+    { "rand",    AO_RAND,    1 },
+    { "at",      AO_AT,      2 },
+    /* feature 1.4 string / math extensions */
+    { "slice",   AO_SLICE,   3 },
+    { "trim",    AO_TRIM,    1 },
+    { "upper",   AO_UPPER,   1 },
+    { "lower",   AO_LOWER,   1 },
+    { "find",    AO_FIND,    2 },
+    { "padl",    AO_PADL,    2 },
+    { "padr",    AO_PADR,    2 },
+    { "replace", AO_REPLACE, 3 },
+    { "floor",   AO_FLOOR,   1 },
+    { "ceil",    AO_CEIL,    1 },
+    { "sqrt",    AO_SQRT,    1 },
 };
 #define NFNS ((int)(sizeof fns / sizeof fns[0]))
 
@@ -683,6 +695,63 @@ static app_val_t time_value(uint16_t field) {
     }
 }
 
+/* Three-argument string functions. Stack order on entry: a=s, b=second, cv=third. */
+static app_val_t call_fn3(uint8_t op, const app_val_t *a, const app_val_t *b,
+                           const app_val_t *cv) {
+    char ta[APP_TEXT_MAX], tb[APP_TEXT_MAX], tc[APP_TEXT_MAX];
+
+    switch (op) {
+    case AO_SLICE: {
+        /* slice(s, i, n) — substring starting at byte i, length n.
+         * i/n truncated toward zero; out-of-range or zero-length → "". */
+        if (a->kind == AV_ERR || b->kind != AV_NUM || cv->kind != AV_NUM)
+            return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        size_t slen = a_len(ta);
+        int64_t idx = b->num  / APP_NUM_SCALE;
+        int64_t n   = cv->num / APP_NUM_SCALE;
+        if (n <= 0 || idx < 0 || (size_t)idx >= slen) return app_val_str("");
+        if ((size_t)(idx + n) > slen) n = (int64_t)(slen - (size_t)idx);
+        char out[APP_TEXT_MAX];
+        size_t o = 0;
+        for (int64_t i = 0; i < n && o + 1 < APP_TEXT_MAX; i++)
+            out[o++] = ta[idx + i];
+        out[o] = '\0';
+        return app_val_str(out);
+    }
+    case AO_REPLACE: {
+        /* replace(s, old, new) — first occurrence of old replaced with new.
+         * If old is empty or not found, s is returned unchanged. Result is
+         * silently truncated to APP_TEXT_MAX-1 bytes. */
+        if (a->kind == AV_ERR || b->kind == AV_ERR || cv->kind == AV_ERR)
+            return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        app_val_text(b, tb, sizeof tb);
+        app_val_text(cv, tc, sizeof tc);
+        size_t slen = a_len(ta);
+        size_t olen = a_len(tb);
+        size_t rlen = a_len(tc);
+        if (olen == 0) return app_val_str(ta);
+        size_t pos = slen;
+        for (size_t i = 0; i + olen <= slen; i++) {
+            size_t k = 0;
+            while (k < olen && ta[i + k] == tb[k]) k++;
+            if (k == olen) { pos = i; break; }
+        }
+        if (pos == slen) return app_val_str(ta);
+        char out[APP_TEXT_MAX];
+        size_t o = 0;
+        for (size_t i = 0; i < pos && o + 1 < APP_TEXT_MAX; i++) out[o++] = ta[i];
+        for (size_t i = 0; i < rlen && o + 1 < APP_TEXT_MAX; i++) out[o++] = tc[i];
+        for (size_t i = pos + olen; ta[i] && o + 1 < APP_TEXT_MAX; i++) out[o++] = ta[i];
+        out[o] = '\0';
+        return app_val_str(out);
+    }
+    default:
+        return app_val_err();
+    }
+}
+
 static app_val_t call_fn(uint8_t op, const app_val_t *a, const app_val_t *b) {
     char ta[APP_TEXT_MAX], tb[APP_TEXT_MAX];
 
@@ -793,6 +862,110 @@ static app_val_t call_fn(uint8_t op, const app_val_t *a, const app_val_t *b) {
         one[1] = '\0';
         return app_val_str(one);
     }
+    /* feature 1.4 string functions */
+    case AO_TRIM: {
+        if (a->kind == AV_ERR) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        size_t b0 = 0, end = a_len(ta);
+        while (b0 < end && ta[b0] == ' ') b0++;
+        while (end > b0 && ta[end - 1] == ' ') end--;
+        char out[APP_TEXT_MAX];
+        size_t o = 0;
+        for (size_t i = b0; i < end && o + 1 < APP_TEXT_MAX; i++) out[o++] = ta[i];
+        out[o] = '\0';
+        return app_val_str(out);
+    }
+    case AO_UPPER: {
+        if (a->kind == AV_ERR) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        for (size_t i = 0; ta[i]; i++)
+            if (ta[i] >= 'a' && ta[i] <= 'z') ta[i] = (char)(ta[i] - 32);
+        return app_val_str(ta);
+    }
+    case AO_LOWER: {
+        if (a->kind == AV_ERR) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        for (size_t i = 0; ta[i]; i++)
+            if (ta[i] >= 'A' && ta[i] <= 'Z') ta[i] = (char)(ta[i] + 32);
+        return app_val_str(ta);
+    }
+    case AO_FIND: {
+        /* find(s, needle) — first byte index, or ERR if not found. */
+        if (a->kind == AV_ERR || b->kind == AV_ERR) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        app_val_text(b, tb, sizeof tb);
+        size_t slen = a_len(ta);
+        size_t nlen = a_len(tb);
+        if (nlen == 0) return app_val_num(0);
+        for (size_t i = 0; i + nlen <= slen; i++) {
+            size_t k = 0;
+            while (k < nlen && ta[i + k] == tb[k]) k++;
+            if (k == nlen) return app_val_num((int64_t)i * APP_NUM_SCALE);
+        }
+        return app_val_err();
+    }
+    case AO_PADL: {
+        /* padl(s, n) — left-pad s with spaces to width n. */
+        if (a->kind == AV_ERR || b->kind != AV_NUM) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        int64_t width = b->num / APP_NUM_SCALE;
+        if (width < 0) width = 0;
+        if (width >= APP_TEXT_MAX) width = APP_TEXT_MAX - 1;
+        size_t slen = a_len(ta);
+        if ((int64_t)slen >= width) return app_val_str(ta);
+        char out[APP_TEXT_MAX];
+        size_t pad = (size_t)width - slen, o = 0;
+        for (size_t i = 0; i < pad && o + 1 < APP_TEXT_MAX; i++) out[o++] = ' ';
+        for (size_t i = 0; ta[i] && o + 1 < APP_TEXT_MAX; i++) out[o++] = ta[i];
+        out[o] = '\0';
+        return app_val_str(out);
+    }
+    case AO_PADR: {
+        /* padr(s, n) — right-pad s with spaces to width n. */
+        if (a->kind == AV_ERR || b->kind != AV_NUM) return app_val_err();
+        app_val_text(a, ta, sizeof ta);
+        int64_t width = b->num / APP_NUM_SCALE;
+        if (width < 0) width = 0;
+        if (width >= APP_TEXT_MAX) width = APP_TEXT_MAX - 1;
+        size_t slen = a_len(ta);
+        if ((int64_t)slen >= width) return app_val_str(ta);
+        char out[APP_TEXT_MAX];
+        size_t pad = (size_t)width - slen, o = 0;
+        for (size_t i = 0; ta[i] && o + 1 < APP_TEXT_MAX; i++) out[o++] = ta[i];
+        for (size_t i = 0; i < pad && o + 1 < APP_TEXT_MAX; i++) out[o++] = ' ';
+        out[o] = '\0';
+        return app_val_str(out);
+    }
+    /* feature 1.4 math extensions */
+    case AO_FLOOR: {
+        /* floor(x): toward negative infinity */
+        if (a->kind != AV_NUM) return app_val_err();
+        int64_t q = a->num / APP_NUM_SCALE;
+        int64_t r = a->num % APP_NUM_SCALE;
+        if (r < 0) q--;
+        return app_val_num(q * APP_NUM_SCALE);
+    }
+    case AO_CEIL: {
+        /* ceil(x): toward positive infinity */
+        if (a->kind != AV_NUM) return app_val_err();
+        int64_t q = a->num / APP_NUM_SCALE;
+        int64_t r = a->num % APP_NUM_SCALE;
+        if (r > 0) q++;
+        return app_val_num(q * APP_NUM_SCALE);
+    }
+    case AO_SQRT: {
+        /* sqrt(x): fixed-point square root. result = floor(sqrt(x) * SCALE).
+         * Computed as isqrt(x_scaled * SCALE) to preserve fractional digits.
+         * x < 0 → ERR. Uses Newton's method over unsigned __int128. */
+        if (a->kind != AV_NUM || a->num < 0) return app_val_err();
+        if (a->num == 0) return app_val_num(0);
+        unsigned __int128 n = (unsigned __int128)(uint64_t)a->num *
+                              (unsigned __int128)(uint64_t)APP_NUM_SCALE;
+        unsigned __int128 r = n, r1 = (r + n / r) / 2;
+        while (r1 < r) { r = r1; r1 = (r + n / r) / 2; }
+        if (r > (unsigned __int128)(uint64_t)APP_NUM_MAX) return app_val_err();
+        return app_val_num((int64_t)(uint64_t)r);
+    }
     default:
         return app_val_err();
     }
@@ -858,9 +1031,20 @@ app_val_t app_expr_eval(const app_inst_t *in, uint16_t index,
 
         /* Unary functions consume one and push one. */
         if (k == AO_NUM || k == AO_TEXT || k == AO_LEN || k == AO_DIGITS ||
-            k == AO_ISERR || k == AO_ABS || k == AO_ROUND || k == AO_RAND) {
+            k == AO_ISERR || k == AO_ABS || k == AO_ROUND || k == AO_RAND ||
+            k == AO_TRIM || k == AO_UPPER || k == AO_LOWER ||
+            k == AO_FLOOR || k == AO_CEIL || k == AO_SQRT) {
             if (sp < 1) return app_val_err();
             st[sp - 1] = call_fn(k, &st[sp - 1], &st[sp - 1]);
+            continue;
+        }
+        /* Ternary functions: consume three, push one. */
+        if (k == AO_SLICE || k == AO_REPLACE) {
+            if (sp < 3) return app_val_err();
+            app_val_t cv = st[--sp];
+            app_val_t bv = st[--sp];
+            app_val_t av = st[sp - 1];
+            st[sp - 1] = call_fn3(k, &av, &bv, &cv);
             continue;
         }
 

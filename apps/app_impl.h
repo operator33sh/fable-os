@@ -83,6 +83,11 @@ enum {
     AO_NUM, AO_TEXT, AO_CAT, AO_LEN, AO_DIGITS, AO_HAS, AO_ISERR,
     AO_ABS, AO_MIN, AO_MAX,
     AO_ROUND, AO_RAND, AO_AT,
+    /* string / math extensions (feature 1.4) */
+    AO_SLICE, AO_TRIM, AO_UPPER, AO_LOWER,
+    AO_FIND, AO_PADL, AO_PADR,
+    AO_REPLACE,
+    AO_FLOOR, AO_CEIL, AO_SQRT,
     AO__COUNT
 };
 
