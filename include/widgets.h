@@ -192,10 +192,11 @@ gui_rect_t gui_center(gui_rect_t area, int32_t w, int32_t h);
 /* Kinds. Kept as a small enum rather than a vtable: there are four of them, the
  * paint switch is 60 lines, and a function pointer per widget per window is
  * memory spent on flexibility nothing has asked for yet. */
-#define GUI_PANEL   0
-#define GUI_LABEL   1
-#define GUI_BUTTON  2
-#define GUI_FIELD   3
+#define GUI_PANEL    0
+#define GUI_LABEL    1
+#define GUI_BUTTON   2
+#define GUI_FIELD    3
+#define GUI_CHECKBOX 4   /* tick-box; text="0"|"1" is the checked state       */
 
 /* State bits. */
 #define GUI_W_DISABLED  0x01   /* greyed; ignores hits                        */
@@ -245,8 +246,12 @@ gui_widget_t *gui_add_label (struct gui_window *win, gui_rect_t r,
                              const char *text, uint8_t align);
 gui_widget_t *gui_add_button(struct gui_window *win, gui_rect_t r,
                              const char *text, uint32_t id);
-gui_widget_t *gui_add_field (struct gui_window *win, gui_rect_t r,
-                             const char *text, uint32_t id, uint8_t state);
+gui_widget_t *gui_add_field   (struct gui_window *win, gui_rect_t r,
+                               const char *text, uint32_t id, uint8_t state);
+/* Tick-box. text="1" constructs checked, anything else unchecked.
+ * w->text is "0" or "1" at all times — this is what expressions read. */
+gui_widget_t *gui_add_checkbox(struct gui_window *win, gui_rect_t r,
+                               const char *initial, uint32_t id);
 
 /* ---- lookup ---- */
 gui_widget_t *gui_widget_by_id(struct gui_window *win, uint32_t id);

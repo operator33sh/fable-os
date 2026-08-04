@@ -876,10 +876,11 @@ static int parse_vars(app_inst_t *in, const json_value_t *root,
 }
 
 static int kind_of(const char *s, uint8_t *out) {
-    if (a_eq(s, "button")) { *out = GUI_BUTTON; return 1; }
-    if (a_eq(s, "label"))  { *out = GUI_LABEL;  return 1; }
-    if (a_eq(s, "field"))  { *out = GUI_FIELD;  return 1; }
-    if (a_eq(s, "panel"))  { *out = GUI_PANEL;  return 1; }
+    if (a_eq(s, "button"))   { *out = GUI_BUTTON;   return 1; }
+    if (a_eq(s, "label"))    { *out = GUI_LABEL;     return 1; }
+    if (a_eq(s, "field"))    { *out = GUI_FIELD;     return 1; }
+    if (a_eq(s, "panel"))    { *out = GUI_PANEL;     return 1; }
+    if (a_eq(s, "checkbox")) { *out = GUI_CHECKBOX;  return 1; }
     return 0;
 }
 
@@ -1497,6 +1498,11 @@ static int app_event(gui_window_t *win, gui_widget_t *w, const gui_event_t *ev) 
      * stopwatch's "start" and the display it writes must agree about `now`. */
     env_begin();
 
+    /* A checkbox toggles its own state before any handler sees the event,
+     * so the handler always reads the NEW checked value. */
+    if (ev->kind == GUI_EV_CLICK && w->kind == GUI_CHECKBOX)
+        gui_set_text(w, (w->text[0] == '1') ? "0" : "1");
+
     uint8_t   want = (ev->kind == GUI_EV_CLICK) ? AE_CLICK : AE_SUBMIT;
     app_val_t key  = app_val_str(w->text);
     int       ran  = 0;
@@ -1820,15 +1826,17 @@ static int instantiate(app_inst_t *in, int32_t x, int32_t y,
         }
 
         switch (d->kind) {
-        case GUI_BUTTON: wd = gui_add_button(win, r, d->text, (uint32_t)(i + 1));
-                         break;
-        case GUI_FIELD:  wd = gui_add_field(win, r, d->text, (uint32_t)(i + 1),
-                                            d->state);
-                         break;
-        case GUI_LABEL:  wd = gui_add_label(win, r, d->text, 0);
-                         break;
-        default:         wd = gui_add_panel(win, r, gui_theme()->client, d->state);
-                         break;
+        case GUI_BUTTON:   wd = gui_add_button(win, r, d->text, (uint32_t)(i + 1));
+                           break;
+        case GUI_FIELD:    wd = gui_add_field(win, r, d->text, (uint32_t)(i + 1),
+                                              d->state);
+                           break;
+        case GUI_LABEL:    wd = gui_add_label(win, r, d->text, 0);
+                           break;
+        case GUI_CHECKBOX: wd = gui_add_checkbox(win, r, d->text, (uint32_t)(i + 1));
+                           break;
+        default:           wd = gui_add_panel(win, r, gui_theme()->client, d->state);
+                           break;
         }
         if (!wd) {
             /* Cannot happen: the widget count was checked against

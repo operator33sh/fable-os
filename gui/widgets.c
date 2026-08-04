@@ -253,6 +253,19 @@ gui_widget_t *gui_add_field(gui_window_t *win, gui_rect_t r, const char *text,
     return w;
 }
 
+gui_widget_t *gui_add_checkbox(gui_window_t *win, gui_rect_t r,
+                              const char *initial, uint32_t id) {
+    gui_widget_t *w = alloc_widget(win, GUI_CHECKBOX, r);
+    if (!w) return w;
+    w->id = id;
+    w->fg = theme->btn_fg;
+    w->bg = theme->client;
+    /* "1" = checked; anything else (including NULL / "") = unchecked.
+     * text is always exactly "0" or "1" so expressions read cleanly. */
+    gui_set_text(w, (initial && initial[0] == '1') ? "1" : "0");
+    return w;
+}
+
 /* ====================================================================== */
 /* lookup                                                                 */
 /* ====================================================================== */
@@ -472,6 +485,19 @@ void gui_paint_widget(fb_surface_t *s, const gui_widget_t *w,
         }
         fb_clip_reset(s);
         fb_clip_set(s, cx, cy, cw, ch);
+        break;
+    }
+
+    case GUI_CHECKBOX: {
+        /* Box is 12×12, vertically centred; fill signals checked state. */
+        int32_t boxsz = 12;
+        int32_t bx    = r.x + 2;
+        int32_t by    = r.y + (r.h - boxsz) / 2;
+        fb_color_t box_fg = disabled ? theme->btn_fg_disabled : w->fg;
+        fb_fill_rect(s, bx, by, boxsz, boxsz, w->bg);
+        fb_frame_rect(s, bx, by, boxsz, boxsz, 1, box_fg);
+        if (w->text[0] == '1')
+            fb_fill_rect(s, bx + 3, by + 3, boxsz - 6, boxsz - 6, box_fg);
         break;
     }
 
