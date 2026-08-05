@@ -437,8 +437,9 @@ void gui_window_set_chrome(uint32_t id, const gui_chrome_t *c);
  * a matching title is opened.  gui_prefs_set() upserts by title (exact
  * match, GUI_TITLE_MAX chars); gui_prefs_clear() drops all entries. */
 #define GUI_PREFS_MAX 16
-void gui_prefs_set  (const char *title, const gui_chrome_t *c);
-void gui_prefs_clear(void);
+void gui_prefs_set     (const char *title, const gui_chrome_t *c);
+void gui_prefs_clear   (void);
+void gui_prefs_bringup (void); /* load /disk/gui_prefs.json at boot; no-op if absent */
 
 int  gui_window_count(void);               /* including hidden ones            */
 /* Bottom (0) to top (count-1) in z-order. NULL when out of range. */

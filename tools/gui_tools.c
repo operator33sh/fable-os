@@ -554,6 +554,55 @@ static void persist_chrome(const char *title, const gui_chrome_t *ch) {
     (void)title; (void)ch;
 }
 
+void gui_prefs_bringup(void) {
+#ifndef FABLEOS_HOSTTEST
+    static char pbuf[PREFS_CAP];
+    file_t *fh = vfs_open(PREFS_PATH, O_RDONLY);
+    if (!fh) return;
+    int64_t pn = vfs_read(fh, pbuf, PREFS_CAP - 1);
+    vfs_close(fh);
+    if (pn <= 0) return;
+    pbuf[pn] = '\0';
+    json_value_t arr;
+    if (json_parse(pbuf, (size_t)pn, &arr) != JSON_OK || arr.type != JSON_ARRAY)
+        return;
+    gui_prefs_clear();
+    for (size_t i = 0; ; i++) {
+        json_value_t elem;
+        if (json_at(&arr, i, &elem) != JSON_OK) break;
+        if (elem.type != JSON_OBJECT) continue;
+        char ptitle[GUI_TITLE_MAX] = {0};
+        if (json_get_str(&elem, "title", ptitle, sizeof ptitle) != JSON_OK) continue;
+        gui_chrome_t pc = {0};
+        char cbuf[16]; fb_color_t cv;
+        if (json_get_str(&elem, "title_bg", cbuf, sizeof cbuf) == JSON_OK &&
+            parse_hex_colour(cbuf, &cv))
+            { pc.title_bg = cv; pc.set |= GUI_CHROME_TITLE_BG; }
+        if (json_get_str(&elem, "title_fg", cbuf, sizeof cbuf) == JSON_OK &&
+            parse_hex_colour(cbuf, &cv))
+            { pc.title_fg = cv; pc.set |= GUI_CHROME_TITLE_FG; }
+        if (json_get_str(&elem, "frame", cbuf, sizeof cbuf) == JSON_OK &&
+            parse_hex_colour(cbuf, &cv))
+            { pc.frame = cv; pc.set |= GUI_CHROME_FRAME; }
+        json_value_t nv; int nb = 0;
+        if (json_get(&elem, "no_close", &nv) == JSON_OK &&
+            nv.type == JSON_BOOL && json_bool(&nv, &nb) == JSON_OK)
+            { if (nb) pc.set |= GUI_CHROME_NOCLOSE;
+              else    pc.set |= GUI_CHROME_HASCLOSE; }
+        json_value_t iv; int64_t iv64 = 0;
+        if (json_get(&elem, "title_h", &iv) == JSON_OK &&
+            iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+            iv64 >= 4 && iv64 <= 127)
+            { pc.title_h = (int8_t)iv64; pc.set |= GUI_CHROME_TITLE_H; }
+        if (json_get(&elem, "close_w", &iv) == JSON_OK &&
+            iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+            iv64 >= 2 && iv64 <= 127)
+            { pc.close_w = (int8_t)iv64; pc.set |= GUI_CHROME_CLOSE_W; }
+        if (pc.set) gui_prefs_set(ptitle, &pc);
+    }
+#endif
+}
+
 static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
     if (gui_ready(r, "gui_window") != 0) return TOOL_EINVAL;
 
@@ -766,7 +815,7 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
         if (has_cws == 1) { ch.close_w = (int8_t)cws; ch.set |= GUI_CHROME_CLOSE_W; }
         gui_window_set_chrome(id, &ch);
         {
-            int persist = 0;
+            int persist = 1;   /* always persist unless caller opts out */
             f_bool(&in, "persist", &persist);
             if (persist) persist_chrome(title, &ch);
         }

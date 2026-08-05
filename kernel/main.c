@@ -614,6 +614,7 @@ void kernel_main(void) {
      * under DISCOVERABILITY. One call: it binds the live list into the
      * capability_call description and then loads the store. */
     capability_bringup();
+    gui_prefs_bringup();    /* restore per-title chrome from /disk/gui_prefs.json */
 
     /* The C compiler's store, for exactly the same two reasons and in exactly the
      * same shape: after the filesystem because the store is a directory in it,

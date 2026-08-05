@@ -308,8 +308,9 @@ const gui_theme_t *gui_theme(void);
  * must outlive the GUI — in practice a static const in an app. */
 void gui_set_theme(const gui_theme_t *t);
 
-/* Chrome geometry, in pixels. Not configurable: the title bar has to hold one
- * 16-pixel glyph row and the close box has to be big enough to hit. */
+/* Chrome geometry defaults, in pixels. Per-window overrides live in
+ * gui_chrome_t (GUI_CHROME_TITLE_H, GUI_CHROME_CLOSE_W); these are the
+ * fallback when no override is set. */
 #define GUI_BORDER    1
 #define GUI_TITLE_H   18
 #define GUI_CLOSE_W   13     /* the close box, inside the title bar          */
