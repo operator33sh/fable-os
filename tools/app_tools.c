@@ -596,12 +596,13 @@ static int t_app(const tool_call_t *c, tool_result_t *r) {
         return TOOL_OK;
     }
 
-    if (!streq(act, "state") && !streq(act, "close"))
+    if (!streq(act, "state") && !streq(act, "close") &&
+        !streq(act, "get_document"))
         return fail(r, TOOL_EINVAL, args,
                     "unknown action \"%s\". Valid: format (the document format "
                     "and a worked example), caps (what a handler may ask the "
-                    "kernel to do, e.g. play a sound), launch, list, state, "
-                    "close", act);
+                    "kernel to do, e.g. play a sound), launch, get_document, "
+                    "list, state, close", act);
 
     if (has_id != 1) {
         r->is_error = 1;
@@ -632,6 +633,18 @@ static int t_app(const tool_call_t *c, tool_result_t *r) {
         const char *why = app_last_error((uint32_t)id64);
         if (why && why[0]) tool_result_printf(r, "note: %s\n", why);
         trace_ok("app", "%s", args);
+        return TOOL_OK;
+    }
+
+    if (streq(act, "get_document")) {
+        const char *src = app_doc_src((uint32_t)id64);
+        if (!src || !src[0]) {
+            trace_err(TOOL_EINVAL, "app", "%s", args);
+            return fail(r, TOOL_EINVAL, args, "document source not available");
+        }
+        tool_result_printf(r, "%s", src);
+        trace_ret((long)id64, "app", "action=get_document id=%u bytes=%zu",
+                  (unsigned)id64, strlen(src));
         return TOOL_OK;
     }
 
@@ -675,7 +688,7 @@ static int t_app(const tool_call_t *c, tool_result_t *r) {
  * fourth mistake in a transcript, put it here rather than in action=format:
  * these bytes are read before the first attempt, and that text is not. */
 static const char *const app_functions[] = {
-    "format", "caps", "launch", "list", "state", "close", NULL
+    "format", "caps", "launch", "get_document", "list", "state", "close", NULL
 };
 
 static const tool_t app_tool = {
@@ -716,6 +729,8 @@ static const tool_t app_tool = {
         "action=launch file=/disk/apps/name.json, agenda_save to re-boot "
         "- always file= not document= in agenda (288-byte cap; "
         "inline fails silently). "
+        "MUTATE: get_document id=<N> returns the live JSON; edit it, "
+        "vfs_write /disk/apps/name.json, re-launch - old window closes. "
         "Also list, state (id), close (id).",
     .input_schema =
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},"

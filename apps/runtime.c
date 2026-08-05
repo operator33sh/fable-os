@@ -1937,6 +1937,13 @@ int app_launch(const char *doc, size_t len, int32_t x, int32_t y,
                    APP_MAX_INSTANCES, ids);
     }
 
+    /* Retain the raw source so action=get_document can return it later.
+     * len <= APP_DOC_MAX is already guaranteed by the check above, so
+     * there is always room for the NUL terminator. */
+    memcpy(in->doc_src, doc, len);
+    in->doc_src[len] = '\0';
+    in->doc_src_len = (uint16_t)len;
+
     /* ---- title and size ---- */
     a_cpy(in->title, sizeof in->title, "App");
     rc = f_str(&root, "title", buf, sizeof buf);
@@ -2081,6 +2088,11 @@ int app_var_at(uint32_t id, int index, const char **name,
 const char *app_last_error(uint32_t id) {
     app_inst_t *in = inst_of(id);
     return in ? in->lasterr : "";
+}
+
+const char *app_doc_src(uint32_t id) {
+    app_inst_t *in = inst_of(id);
+    return in ? in->doc_src : NULL;
 }
 
 static const char *kindname(uint8_t k) {

@@ -733,6 +733,12 @@ int  app_var_at(uint32_t id, int index, const char **name,
  * reached a widget. "" when nothing has gone wrong. Never NULL. */
 const char *app_last_error(uint32_t id);
 
+/* The raw JSON source that was compiled at launch time, NUL-terminated.
+ * Returns NULL when the app id is unknown.  The returned pointer is valid
+ * until the app is closed.  Used by action=get_document to enable the
+ * mutation workflow: get_document → edit → vfs_write → launch file=. */
+const char *app_doc_src(uint32_t id);
+
 /* One-line-per-widget human description (kind, id, name, text, and whether it
  * is clickable) for a tool result. Returns the number of bytes that WOULD be
  * written, snprintf-style.

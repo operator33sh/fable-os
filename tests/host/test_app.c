@@ -1305,14 +1305,16 @@ static void test_tool_registry_and_schema_cost(void) {
      * RAISED 1800 -> 2100 once (ticking clock correction, 150 bytes).
      * RAISED 2100 -> 2450: added action=launch file=<vfs_path> to enable
      * persistent apps across reboots via vfs_write + agenda_save (289 bytes).
+     * RAISED 2450 -> 2650: added action=get_document to enable app mutation
+     * workflow (get_document -> edit -> vfs_write -> re-launch, 123 bytes).
      * Checked against the numbers, not against a feeling: the registry is
      * CHAT_REGISTRY_BYTES of CHAT_TOOLS_BYTES=40960, and the CHAT_REQ_BYTES
-     * assertion below covers the second bound. Do not treat 2450 as a target. */
+     * assertion below covers the second bound. Do not treat 2650 as a target. */
     size_t cost = wire_cost(t);
-    printf("    (app tool wire cost %zu bytes; ceiling 2450, and the whole "
+    printf("    (app tool wire cost %zu bytes; ceiling 2650, and the whole "
            "45-tool registry is %d of CHAT_TOOLS_BYTES=%d)\n",
            cost, CHAT_REGISTRY_BYTES, CHAT_TOOLS_BYTES);
-    CHECK(cost <= 2450);
+    CHECK(cost <= 2650);
     CHECK(CHAT_REGISTRY_BYTES < CHAT_TOOLS_BYTES);
 
     /* The headroom the banner reports must be real headroom, not a rounding
@@ -1661,6 +1663,19 @@ static void test_tool_launch_list_state_close(void) {
     CHECK_CONTAINS(rbuf, "text=\"15\"");
     CHECK_CONTAINS(rbuf, "acc=15");
     CHECK_EQ(trace_lines(), 1);
+
+    /* get_document: returns the original JSON source for mutation workflow */
+    snprintf(q, sizeof q, "{\"action\":\"get_document\",\"id\":%u}", (unsigned)id);
+    CHECK_EQ(call(q), TOOL_OK);
+    CHECK_EQ(res.is_error, 0);
+    CHECK_CONTAINS(rbuf, "\"Calculator\"");   /* title is in the source */
+    CHECK_CONTAINS(rbuf, "\"widgets\"");
+    CHECK_CONTAINS(kcap_text(), "[app action=get_document");
+    CHECK_EQ(trace_lines(), 1);
+
+    /* get_document on unknown id returns an error */
+    CHECK(call("{\"action\":\"get_document\",\"id\":99999}") < 0);
+    CHECK_EQ(res.is_error, 1);
 
     /* close */
     snprintf(q, sizeof q, "{\"action\":\"close\",\"id\":%u}", (unsigned)id);

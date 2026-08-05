@@ -237,6 +237,15 @@ typedef struct app_inst {
      * that says what to DO about it. The bound matches app_error_t.msg, so a
      * refusal reads the same whether it happened at load time or at run time. */
     char      lasterr[224];
+
+    /* Raw JSON source retained so that action=get_document can return it.
+     * Enables the mutation workflow: get_document → edit → vfs_write →
+     * launch file=. Sized to APP_DOC_MAX (the same limit app_launch() checks)
+     * so a document that was accepted is always small enough to store whole.
+     * doc_src_len == 0 means not stored (should not occur after a successful
+     * launch, but guards against future code paths that skip the copy). */
+    char     doc_src[APP_DOC_MAX];
+    uint16_t doc_src_len;
 } app_inst_t;
 
 /* ====================================================================== */
