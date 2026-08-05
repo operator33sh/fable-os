@@ -712,9 +712,10 @@ static const tool_t app_tool = {
         "keypad one tag and branch on key. Otherwise guessing is safe: a "
         "rejection names the exact fault and carries a working skeleton, so "
         "attempt two lands. action=format is the full spec. "
-        "PERSIST across reboots: vfs_write /apps/name.json <document>, then "
-        "action=launch file=/apps/name.json (instead of document=), then "
-        "agenda_save with that same tool call to re-launch at boot. "
+        "PERSIST: vfs_write /disk/apps/name.json <doc>, "
+        "action=launch file=/disk/apps/name.json, agenda_save to re-boot "
+        "- always file= not document= in agenda (288-byte cap; "
+        "inline fails silently). "
         "Also list, state (id), close (id).",
     .input_schema =
         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\"},"
