@@ -420,7 +420,25 @@ REGISTER_TOOL(gui_open_tool);
 
 /* ====================================================================== */
 /* gui_window — focus / raise / move / resize / hide / show / close        */
+/*              set_title / set_chrome                                      */
 /* ====================================================================== */
+
+/* Parse "#RRGGBB" into an fb_color_t.  Returns 1 on success, 0 otherwise. */
+static int parse_hex_colour(const char *s, fb_color_t *out) {
+    if (!s || s[0] != '#' || s[7] != '\0') return 0;
+    uint32_t v = 0;
+    for (int i = 1; i <= 6; i++) {
+        char     ch = s[i];
+        uint32_t d;
+        if      (ch >= '0' && ch <= '9') d = (uint32_t)(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') d = (uint32_t)(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') d = (uint32_t)(ch - 'A' + 10);
+        else return 0;
+        v = (v << 4) | d;
+    }
+    *out = (fb_color_t)v;
+    return 1;
+}
 
 static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
     if (gui_ready(r, "gui_window") != 0) return TOOL_EINVAL;
@@ -508,10 +526,45 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
         done = gui_window_show(id, 0) == 0;
     } else if (streq(act, "show")) {
         done = gui_window_show(id, 1) == 0;
+    } else if (streq(act, "set_title")) {
+        char newtitle[GUI_TITLE_MAX];
+        if (f_str(&in, "title", newtitle, sizeof newtitle) != 1)
+            return fail(r, TOOL_EINVAL, "gui_window", args,
+                        "set_title needs a \"title\" string");
+        gui_set_title(id, newtitle);
+        done = 1;
+    } else if (streq(act, "set_chrome")) {
+        gui_chrome_t ch = w->chrome;   /* merge: preserve existing overrides */
+        char         cbuf[16];
+        fb_color_t   cv;
+        if (f_str(&in, "title_bg", cbuf, sizeof cbuf) == 1 &&
+            parse_hex_colour(cbuf, &cv))
+            { ch.title_bg = cv; ch.set |= GUI_CHROME_TITLE_BG; }
+        if (f_str(&in, "title_fg", cbuf, sizeof cbuf) == 1 &&
+            parse_hex_colour(cbuf, &cv))
+            { ch.title_fg = cv; ch.set |= GUI_CHROME_TITLE_FG; }
+        if (f_str(&in, "frame", cbuf, sizeof cbuf) == 1 &&
+            parse_hex_colour(cbuf, &cv))
+            { ch.frame = cv; ch.set |= GUI_CHROME_FRAME; }
+        json_value_t ncv;
+        int          ncb = 0;
+        if (json_get(&in, "no_close", &ncv) == JSON_OK &&
+            ncv.type == JSON_BOOL &&
+            json_bool(&ncv, &ncb) == JSON_OK) {
+            if (ncb) {
+                ch.set |= GUI_CHROME_NOCLOSE;
+                ch.set &= (uint8_t)~GUI_CHROME_HASCLOSE;
+            } else {
+                ch.set |= GUI_CHROME_HASCLOSE;
+                ch.set &= (uint8_t)~GUI_CHROME_NOCLOSE;
+            }
+        }
+        gui_window_set_chrome(id, &ch);
+        done = 1;
     } else {
         return fail(r, TOOL_EINVAL, "gui_window", args,
                     "unknown action \"%s\". Valid actions: focus, raise, move, "
-                    "resize, hide, show, close", act);
+                    "resize, hide, show, close, set_title, set_chrome", act);
     }
     (void)done;
 
@@ -537,7 +590,8 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
 }
 
 static const char *const gui_window_functions[] = {
-    "focus", "raise", "move", "resize", "hide", "show", "close", NULL
+    "focus", "raise", "move", "resize", "hide", "show", "close",
+    "set_title", "set_chrome", NULL
 };
 
 static const tool_t gui_window_tool = {
@@ -545,16 +599,21 @@ static const tool_t gui_window_tool = {
     .functions = gui_window_functions,
     .description =
         "Act on one window: focus (which also raises it), raise, move, resize, "
-        "hide, show, or close. Ids come from gui_list. Pixel values are clamped "
-        "so a window is never left unreachable or unusably small, and the result "
-        "says when that happened.",
+        "hide, show, close, set_title, or set_chrome. Ids come from gui_list. "
+        "set_title changes the title bar text live. set_chrome sets per-window "
+        "chrome colours (title_bg, title_fg, frame as #RRGGBB) and no_close "
+        "(true/false); omitted fields keep their current value. Chrome set here "
+        "OR in the app document \"chrome\" section both apply.",
     .input_schema =
         "{\"type\":\"object\",\"properties\":{"
         "\"id\":{\"type\":\"integer\",\"description\":\"id from gui_list\"},"
         "\"action\":{\"type\":\"string\",\"enum\":[\"focus\",\"raise\",\"move\","
-        "\"resize\",\"hide\",\"show\",\"close\"]},"
+        "\"resize\",\"hide\",\"show\",\"close\",\"set_title\",\"set_chrome\"]},"
         "\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},"
-        "\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"}"
+        "\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},"
+        "\"title\":{\"type\":\"string\"},"
+        "\"title_bg\":{\"type\":\"string\"},\"title_fg\":{\"type\":\"string\"},"
+        "\"frame\":{\"type\":\"string\"},\"no_close\":{\"type\":\"boolean\"}"
         "},\"required\":[\"id\",\"action\"]}",
     .flags  = TOOL_MUTATES,
     .invoke = t_gui_window,

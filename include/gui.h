@@ -296,6 +296,21 @@
 #define GUI_WIN_NOMOVE   0x02   /* the title bar does not drag                  */
 #define GUI_WIN_HIDDEN   0x04   /* created but not composited                   */
 
+/* Per-window chrome overrides.  Set bits in gui_chrome_t.set to activate.
+ * Unset fields fall through to the global gui_theme(). */
+#define GUI_CHROME_TITLE_BG  0x01   /* override title bar fill                 */
+#define GUI_CHROME_TITLE_FG  0x02   /* override title text and close-X colour  */
+#define GUI_CHROME_FRAME     0x04   /* override border colour                  */
+#define GUI_CHROME_NOCLOSE   0x08   /* hide close button (chrome-level toggle) */
+#define GUI_CHROME_HASCLOSE  0x10   /* force-show close button                 */
+
+typedef struct {
+    uint8_t    set;        /* OR of GUI_CHROME_* bits that are active          */
+    fb_color_t title_bg;   /* title bar fill (focused and unfocused states)    */
+    fb_color_t title_fg;   /* title text and close-X glyph colour              */
+    fb_color_t frame;      /* border colour                                    */
+} gui_chrome_t;
+
 /* Event kinds. */
 #define GUI_EV_MOUSE_DOWN 1
 #define GUI_EV_MOUSE_UP   2
@@ -339,6 +354,7 @@ typedef struct gui_window {
     gui_widget_t  widgets[GUI_MAX_WIDGETS];
     gui_window_fn on_event;
     void         *user;                  /* app-private                       */
+    gui_chrome_t  chrome;                /* per-window chrome overrides       */
 } gui_window_t;
 
 /* ---- health counters, cumulative for the life of the GUI ---- */
@@ -411,6 +427,7 @@ int  gui_window_focus (uint32_t id);      /* raises as well                    *
 int  gui_window_show  (uint32_t id, int visible);
 int  gui_set_hook     (uint32_t id, gui_window_fn fn);
 int  gui_set_title    (uint32_t id, const char *title);
+void gui_window_set_chrome(uint32_t id, const gui_chrome_t *c);
 
 int  gui_window_count(void);               /* including hidden ones            */
 /* Bottom (0) to top (count-1) in z-order. NULL when out of range. */

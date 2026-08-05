@@ -1917,7 +1917,8 @@ int app_launch(const char *doc, size_t len, int32_t x, int32_t y,
                    "not a bare array or value");
     {
         static const char *const rkeys[] = {
-            "title", "width", "height", "grid", "vars", "widgets", "on", 0
+            "title", "width", "height", "grid", "vars", "widgets", "on",
+            "chrome", 0
         };
         rc = check_keys(&root, "", rkeys, err);
         if (rc != APP_OK) return rc;
@@ -2023,6 +2024,35 @@ int app_launch(const char *doc, size_t len, int32_t x, int32_t y,
     /* ---- and only now, a window ---- */
     rc = instantiate(in, x, y, (int32_t)wv, (int32_t)hv, err);
     if (rc != APP_OK) { in->used = 0; return rc; }
+
+    /* Optional "chrome" section: per-window title bar, border, close button. */
+    {
+        json_value_t cobj;
+        if (json_get(&root, "chrome", &cobj) == JSON_OK &&
+            cobj.type == JSON_OBJECT) {
+            gui_chrome_t ch = {0};
+            char cbuf[16];
+            fb_color_t   cv;
+            if (json_get_str(&cobj, "title_bg", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_color(cbuf, &cv))
+                { ch.title_bg = cv; ch.set |= GUI_CHROME_TITLE_BG; }
+            if (json_get_str(&cobj, "title_fg", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_color(cbuf, &cv))
+                { ch.title_fg = cv; ch.set |= GUI_CHROME_TITLE_FG; }
+            if (json_get_str(&cobj, "frame", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_color(cbuf, &cv))
+                { ch.frame = cv; ch.set |= GUI_CHROME_FRAME; }
+            json_value_t ncv;
+            int          ncb = 0;
+            if (json_get(&cobj, "no_close", &ncv) == JSON_OK &&
+                ncv.type == JSON_BOOL &&
+                json_bool(&ncv, &ncb) == JSON_OK) {
+                if (ncb) ch.set |= GUI_CHROME_NOCLOSE;
+                else     ch.set |= GUI_CHROME_HASCLOSE;
+            }
+            if (ch.set) gui_window_set_chrome(in->win, &ch);
+        }
+    }
 
     stats.launches++;
     if (out_id) *out_id = in->win;

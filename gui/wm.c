@@ -169,8 +169,25 @@ static gui_rect_t title_rect(const gui_window_t *w) {
                     w->frame.w - 2 * GUI_BORDER, GUI_TITLE_H);
 }
 
+static fb_color_t w_title_bg(const gui_window_t *w, int focused) {
+    if (w->chrome.set & GUI_CHROME_TITLE_BG) return w->chrome.title_bg;
+    return focused ? gui_theme()->title_bg_focus : gui_theme()->title_bg;
+}
+static fb_color_t w_title_fg(const gui_window_t *w) {
+    if (w->chrome.set & GUI_CHROME_TITLE_FG) return w->chrome.title_fg;
+    return gui_theme()->title_fg_focus;
+}
+static fb_color_t w_frame(const gui_window_t *w, int focused) {
+    if (w->chrome.set & GUI_CHROME_FRAME) return w->chrome.frame;
+    return focused ? gui_theme()->frame_focus : gui_theme()->frame;
+}
+
 static gui_rect_t close_rect(const gui_window_t *w) {
-    if (!w || (w->flags & GUI_WIN_NOCLOSE)) return gui_rect(0, 0, 0, 0);
+    if (!w) return gui_rect(0, 0, 0, 0);
+    int no_close = (w->flags & GUI_WIN_NOCLOSE) != 0;
+    if (w->chrome.set & GUI_CHROME_NOCLOSE)  no_close = 1;
+    if (w->chrome.set & GUI_CHROME_HASCLOSE) no_close = 0;
+    if (no_close) return gui_rect(0, 0, 0, 0);
     gui_rect_t t = title_rect(w);
     if (t.w < GUI_CLOSE_W + 6 || t.h < GUI_CLOSE_W) return gui_rect(0, 0, 0, 0);
     return gui_rect(t.x + t.w - GUI_CLOSE_W - 3,
@@ -362,16 +379,13 @@ static void paint_backdrop(gui_rect_t r) {
     }
 }
 
-static void paint_close_box(gui_rect_t b, int focused) {
-    const gui_theme_t *t = gui_theme();
-    fb_frame_rect(dst, b.x, b.y, b.w, b.h, 1,
-                  focused ? t->title_fg_focus : t->title_fg);
+static void paint_close_box(gui_rect_t b, fb_color_t colour) {
+    fb_frame_rect(dst, b.x, b.y, b.w, b.h, 1, colour);
     /* Two diagonals inside the box, drawn by hand: an 'x' glyph in an 8x16 cell
      * is not square and reads as a letter. */
-    fb_color_t c = focused ? t->title_fg_focus : t->title_fg;
     for (int32_t i = 3; i < b.w - 3; i++) {
-        fb_put_pixel(dst, b.x + i, b.y + i, c);
-        fb_put_pixel(dst, b.x + i, b.y + b.h - 1 - i, c);
+        fb_put_pixel(dst, b.x + i, b.y + i, colour);
+        fb_put_pixel(dst, b.x + i, b.y + b.h - 1 - i, colour);
     }
 }
 
@@ -386,18 +400,17 @@ static void paint_window(gui_window_t *w, gui_rect_t area) {
     /* Frame and border. */
     fb_fill_rect(dst, w->frame.x, w->frame.y, w->frame.w, w->frame.h, t->client);
     fb_frame_rect(dst, w->frame.x, w->frame.y, w->frame.w, w->frame.h,
-                  GUI_BORDER, focused ? t->frame_focus : t->frame);
+                  GUI_BORDER, w_frame(w, focused));
 
     /* Title bar. */
     gui_rect_t tb = title_rect(w);
-    fb_fill_rect(dst, tb.x, tb.y, tb.w, tb.h,
-                 focused ? t->title_bg_focus : t->title_bg);
+    fb_fill_rect(dst, tb.x, tb.y, tb.w, tb.h, w_title_bg(w, focused));
     gui_rect_t cb = close_rect(w);
     gui_rect_t tt = tb;
     if (!gui_rect_empty(cb)) tt.w = cb.x - tb.x - 2;
     gui_paint_text(dst, gui_inset(tt, 5, 0), w->title, GUI_ALIGN_LEFT,
-                   focused ? t->title_fg_focus : t->title_fg);
-    if (!gui_rect_empty(cb)) paint_close_box(cb, focused);
+                   w_title_fg(w));
+    if (!gui_rect_empty(cb)) paint_close_box(cb, w_title_fg(w));
 
     /* Client area and widgets. Narrowing the clip here is what makes a widget
      * laid out past the edge of its window harmless. */
@@ -825,6 +838,13 @@ int gui_set_title(uint32_t id, const char *title) {
     set_title(w, title);
     damage_rect(title_rect(w));
     return 0;
+}
+
+void gui_window_set_chrome(uint32_t id, const gui_chrome_t *c) {
+    gui_window_t *w = slot_of(id);
+    if (!w || !c) return;
+    w->chrome = *c;
+    damage_rect(w->frame);
 }
 
 uint32_t gui_window_at(int32_t x, int32_t y) {
