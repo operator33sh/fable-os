@@ -303,12 +303,16 @@
 #define GUI_CHROME_FRAME     0x04   /* override border colour                  */
 #define GUI_CHROME_NOCLOSE   0x08   /* hide close button (chrome-level toggle) */
 #define GUI_CHROME_HASCLOSE  0x10   /* force-show close button                 */
+#define GUI_CHROME_TITLE_H   0x20   /* override title bar height in pixels      */
+#define GUI_CHROME_CLOSE_W   0x40   /* override close button size in pixels     */
 
 typedef struct {
     uint8_t    set;        /* OR of GUI_CHROME_* bits that are active          */
     fb_color_t title_bg;   /* title bar fill (focused and unfocused states)    */
     fb_color_t title_fg;   /* title text and close-X glyph colour              */
     fb_color_t frame;      /* border colour                                    */
+    int8_t     title_h;    /* title bar height (pixels); 0 = use global default */
+    int8_t     close_w;    /* close button size (pixels); 0 = use global default */
 } gui_chrome_t;
 
 /* Event kinds. */
@@ -428,6 +432,13 @@ int  gui_window_show  (uint32_t id, int visible);
 int  gui_set_hook     (uint32_t id, gui_window_fn fn);
 int  gui_set_title    (uint32_t id, const char *title);
 void gui_window_set_chrome(uint32_t id, const gui_chrome_t *c);
+
+/* Per-title chrome preferences, applied automatically when a window with
+ * a matching title is opened.  gui_prefs_set() upserts by title (exact
+ * match, GUI_TITLE_MAX chars); gui_prefs_clear() drops all entries. */
+#define GUI_PREFS_MAX 16
+void gui_prefs_set  (const char *title, const gui_chrome_t *c);
+void gui_prefs_clear(void);
 
 int  gui_window_count(void);               /* including hidden ones            */
 /* Bottom (0) to top (count-1) in z-order. NULL when out of range. */

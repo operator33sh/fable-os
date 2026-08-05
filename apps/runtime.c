@@ -2050,6 +2050,20 @@ int app_launch(const char *doc, size_t len, int32_t x, int32_t y,
                 if (ncb) ch.set |= GUI_CHROME_NOCLOSE;
                 else     ch.set |= GUI_CHROME_HASCLOSE;
             }
+            {
+                int64_t th = 0, cws = 0;
+                json_value_t tv;
+                if (json_get(&cobj, "title_h", &tv) == JSON_OK &&
+                    tv.type == JSON_NUMBER) {
+                    if (json_int(&tv, &th) == JSON_OK && th >= 4 && th <= 127)
+                        { ch.title_h = (int8_t)th; ch.set |= GUI_CHROME_TITLE_H; }
+                }
+                if (json_get(&cobj, "close_w", &tv) == JSON_OK &&
+                    tv.type == JSON_NUMBER) {
+                    if (json_int(&tv, &cws) == JSON_OK && cws >= 2 && cws <= 127)
+                        { ch.close_w = (int8_t)cws; ch.set |= GUI_CHROME_CLOSE_W; }
+                }
+            }
             if (ch.set) gui_window_set_chrome(in->win, &ch);
         }
     }

@@ -56,6 +56,9 @@
 #include "json.h"
 #include "gui.h"
 #include "widgets.h"
+#ifndef FABLEOS_HOSTTEST
+#include "vfs.h"
+#endif
 
 #include <stdint.h>
 #include <stddef.h>
@@ -440,6 +443,117 @@ static int parse_hex_colour(const char *s, fb_color_t *out) {
     return 1;
 }
 
+#define PREFS_PATH "/disk/gui_prefs.json"
+#define PREFS_CAP  4096
+
+/* Serialize one chrome entry as a JSON object into dst. Returns byte count. */
+static int fmt_chrome_entry(char *dst, size_t cap,
+                             const char *title, const gui_chrome_t *ch) {
+    int n = 0;
+    n += snprintf(dst + n, cap - (size_t)n, "{\"title\":\"%s\"", title);
+    if (ch->set & GUI_CHROME_TITLE_BG)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"title_bg\":\"#%06x\"",
+                      (unsigned)(ch->title_bg & 0xFFFFFF));
+    if (ch->set & GUI_CHROME_TITLE_FG)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"title_fg\":\"#%06x\"",
+                      (unsigned)(ch->title_fg & 0xFFFFFF));
+    if (ch->set & GUI_CHROME_FRAME)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"frame\":\"#%06x\"",
+                      (unsigned)(ch->frame & 0xFFFFFF));
+    if (ch->set & GUI_CHROME_TITLE_H)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"title_h\":%d",
+                      (int)(uint8_t)ch->title_h);
+    if (ch->set & GUI_CHROME_CLOSE_W)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"close_w\":%d",
+                      (int)(uint8_t)ch->close_w);
+    if (ch->set & GUI_CHROME_NOCLOSE)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"no_close\":true");
+    else if (ch->set & GUI_CHROME_HASCLOSE)
+        n += snprintf(dst+n, cap-(size_t)n, ",\"no_close\":false");
+    n += snprintf(dst+n, cap-(size_t)n, "}");
+    return n;
+}
+
+/* Write or update the chrome entry for `title` in PREFS_PATH. */
+static void persist_chrome(const char *title, const gui_chrome_t *ch) {
+#ifndef FABLEOS_HOSTTEST
+    static char buf[PREFS_CAP];
+    static char old[PREFS_CAP];
+    int olen = 0;
+
+    file_t *fh = vfs_open(PREFS_PATH, O_RDONLY);
+    if (fh) {
+        int64_t n = vfs_read(fh, old, PREFS_CAP - 1);
+        if (n > 0) { old[n] = '\0'; olen = (int)n; }
+        vfs_close(fh);
+    }
+
+    int blen = 0;
+    buf[blen++] = '[';
+    int any = 0;
+
+    if (olen > 0) {
+        json_value_t arr;
+        if (json_parse(old, (size_t)olen, &arr) == JSON_OK &&
+            arr.type == JSON_ARRAY) {
+            for (int i = 0; ; i++) {
+                json_value_t elem;
+                if (json_at(&arr, i, &elem) != JSON_OK) break;
+                if (elem.type != JSON_OBJECT) continue;
+                char etitle[GUI_TITLE_MAX] = {0};
+                if (json_get_str(&elem, "title", etitle, sizeof etitle) != JSON_OK)
+                    continue;
+                /* Skip the entry we're replacing. */
+                size_t j = 0;
+                while (j < GUI_TITLE_MAX - 1 && etitle[j] && etitle[j] == title[j])
+                    j++;
+                if (!etitle[j] && !title[j]) continue;
+                /* Re-parse and re-emit this entry. */
+                gui_chrome_t ec = {0};
+                char cbuf[16]; fb_color_t cv;
+                if (json_get_str(&elem, "title_bg", cbuf, sizeof cbuf) == JSON_OK &&
+                    parse_hex_colour(cbuf, &cv))
+                    { ec.title_bg = cv; ec.set |= GUI_CHROME_TITLE_BG; }
+                if (json_get_str(&elem, "title_fg", cbuf, sizeof cbuf) == JSON_OK &&
+                    parse_hex_colour(cbuf, &cv))
+                    { ec.title_fg = cv; ec.set |= GUI_CHROME_TITLE_FG; }
+                if (json_get_str(&elem, "frame", cbuf, sizeof cbuf) == JSON_OK &&
+                    parse_hex_colour(cbuf, &cv))
+                    { ec.frame = cv; ec.set |= GUI_CHROME_FRAME; }
+                json_value_t nv; int nb = 0;
+                if (json_get(&elem, "no_close", &nv) == JSON_OK &&
+                    nv.type == JSON_BOOL && json_bool(&nv, &nb) == JSON_OK)
+                    { if (nb) ec.set |= GUI_CHROME_NOCLOSE;
+                      else    ec.set |= GUI_CHROME_HASCLOSE; }
+                json_value_t iv; int64_t iv64 = 0;
+                if (json_get(&elem, "title_h", &iv) == JSON_OK &&
+                    iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+                    iv64 >= 4 && iv64 <= 127)
+                    { ec.title_h = (int8_t)iv64; ec.set |= GUI_CHROME_TITLE_H; }
+                if (json_get(&elem, "close_w", &iv) == JSON_OK &&
+                    iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+                    iv64 >= 2 && iv64 <= 127)
+                    { ec.close_w = (int8_t)iv64; ec.set |= GUI_CHROME_CLOSE_W; }
+                if (any) buf[blen++] = ',';
+                blen += fmt_chrome_entry(buf + blen, PREFS_CAP - (size_t)blen - 8,
+                                         etitle, &ec);
+                any = 1;
+                if (blen + 256 >= PREFS_CAP) break;
+            }
+        }
+    }
+
+    if (any) buf[blen++] = ',';
+    blen += fmt_chrome_entry(buf + blen, PREFS_CAP - (size_t)blen - 4, title, ch);
+    buf[blen++] = ']';
+    buf[blen]   = '\0';
+
+    fh = vfs_open(PREFS_PATH, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fh) { vfs_write(fh, buf, (uint64_t)blen); vfs_close(fh); }
+#endif /* !FABLEOS_HOSTTEST */
+    (void)title; (void)ch;
+}
+
 static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
     if (gui_ready(r, "gui_window") != 0) return TOOL_EINVAL;
 
@@ -448,6 +562,88 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
         return fail(r, TOOL_EINVAL, "gui_window", "",
                     "input must be a JSON object, e.g. "
                     "{\"id\":3,\"action\":\"move\",\"x\":100,\"y\":80}");
+
+    /* Parse action first so load_prefs can bypass the id requirement. */
+    char act[24] = {0};
+    int  arc = f_str(&in, "action", act, sizeof act);
+
+    /* load_prefs: populate the in-RAM prefs table from a JSON file; no window
+     * id needed because it acts globally on future opens, not on a live window. */
+    if (arc == 1 && streq(act, "load_prefs")) {
+        char file[128] = {0};
+        if (f_str(&in, "file", file, sizeof file) != 1)
+            return fail(r, TOOL_EINVAL, "gui_window", "action=load_prefs",
+                        "load_prefs needs a \"file\" path");
+        static char pbuf[PREFS_CAP];
+        int64_t pn = 0;
+#ifndef FABLEOS_HOSTTEST
+        file_t *pfh = vfs_open(file, O_RDONLY);
+        if (!pfh)
+            return fail(r, TOOL_ENOENT, "gui_window", "action=load_prefs",
+                        "load_prefs: file not found: %s", file);
+        pn = vfs_read(pfh, pbuf, PREFS_CAP - 1);
+        vfs_close(pfh);
+        if (pn <= 0)
+            return fail(r, TOOL_EINVAL, "gui_window", "action=load_prefs",
+                        "load_prefs: could not read %s", file);
+#else
+        (void)file;
+        return fail(r, TOOL_EINVAL, "gui_window", "action=load_prefs",
+                    "load_prefs: not available in host test mode");
+#endif
+        pbuf[pn] = '\0';
+        json_value_t parr;
+        if (json_parse(pbuf, (size_t)pn, &parr) != JSON_OK ||
+            parr.type != JSON_ARRAY)
+            return fail(r, TOOL_EINVAL, "gui_window", "action=load_prefs",
+                        "load_prefs: %s must be a JSON array", file);
+        gui_prefs_clear();
+        int loaded = 0;
+        for (int pi = 0; ; pi++) {
+            json_value_t pelem;
+            if (json_at(&parr, pi, &pelem) != JSON_OK) break;
+            if (pelem.type != JSON_OBJECT) continue;
+            char ptitle[GUI_TITLE_MAX] = {0};
+            if (json_get_str(&pelem, "title", ptitle, sizeof ptitle) != JSON_OK)
+                continue;
+            gui_chrome_t pc = {0};
+            char cbuf[16]; fb_color_t cv;
+            if (json_get_str(&pelem, "title_bg", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_hex_colour(cbuf, &cv))
+                { pc.title_bg = cv; pc.set |= GUI_CHROME_TITLE_BG; }
+            if (json_get_str(&pelem, "title_fg", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_hex_colour(cbuf, &cv))
+                { pc.title_fg = cv; pc.set |= GUI_CHROME_TITLE_FG; }
+            if (json_get_str(&pelem, "frame", cbuf, sizeof cbuf) == JSON_OK &&
+                parse_hex_colour(cbuf, &cv))
+                { pc.frame = cv; pc.set |= GUI_CHROME_FRAME; }
+            json_value_t nv; int nb = 0;
+            if (json_get(&pelem, "no_close", &nv) == JSON_OK &&
+                nv.type == JSON_BOOL && json_bool(&nv, &nb) == JSON_OK)
+                { if (nb) pc.set |= GUI_CHROME_NOCLOSE;
+                  else    pc.set |= GUI_CHROME_HASCLOSE; }
+            json_value_t iv; int64_t iv64 = 0;
+            if (json_get(&pelem, "title_h", &iv) == JSON_OK &&
+                iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+                iv64 >= 4 && iv64 <= 127)
+                { pc.title_h = (int8_t)iv64; pc.set |= GUI_CHROME_TITLE_H; }
+            if (json_get(&pelem, "close_w", &iv) == JSON_OK &&
+                iv.type == JSON_NUMBER && json_int(&iv, &iv64) == JSON_OK &&
+                iv64 >= 2 && iv64 <= 127)
+                { pc.close_w = (int8_t)iv64; pc.set |= GUI_CHROME_CLOSE_W; }
+            if (pc.set) { gui_prefs_set(ptitle, &pc); loaded++; }
+        }
+        tool_result_printf(r,
+            "loaded %d chrome preference(s) from %s. "
+            "Windows opened after this call will have the stored chrome applied. "
+            "Add an agenda boot item (tool=gui_window, "
+            "arg={\"action\":\"load_prefs\",\"file\":\"%s\"}) "
+            "to apply automatically on every reboot.\n",
+            loaded, file, file);
+        trace_ok("gui_window", "action=load_prefs file=%s entries=%d",
+                 file, loaded);
+        return TOOL_OK;
+    }
 
     int64_t id64 = 0;
     int rc = f_int(&in, "id", 1, 0x7FFFFFFF, &id64);
@@ -458,8 +654,6 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
     if (rc == -2) return fail(r, TOOL_EINVAL, "gui_window", "",
                               "\"id\" is not a possible window id");
 
-    char act[24];
-    int  arc = f_str(&in, "action", act, sizeof act);
     char args[80];
     if (arc <= 0) {
         argf(args, sizeof args, "id=%u action=?", (unsigned)id64);
@@ -559,7 +753,23 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
                 ch.set &= (uint8_t)~GUI_CHROME_NOCLOSE;
             }
         }
+        int64_t th = 0, cws = 0;
+        int has_th  = f_int(&in, "title_h",  4, 127, &th);
+        int has_cws = f_int(&in, "close_w",  2, 127, &cws);
+        if (has_th == -1 || has_th == -2)
+            return fail(r, TOOL_EINVAL, "gui_window", args,
+                        "\"title_h\" must be an integer between 4 and 127 pixels");
+        if (has_cws == -1 || has_cws == -2)
+            return fail(r, TOOL_EINVAL, "gui_window", args,
+                        "\"close_w\" must be an integer between 2 and 127 pixels");
+        if (has_th == 1)  { ch.title_h = (int8_t)th;  ch.set |= GUI_CHROME_TITLE_H; }
+        if (has_cws == 1) { ch.close_w = (int8_t)cws; ch.set |= GUI_CHROME_CLOSE_W; }
         gui_window_set_chrome(id, &ch);
+        {
+            int persist = 0;
+            f_bool(&in, "persist", &persist);
+            if (persist) persist_chrome(title, &ch);
+        }
         done = 1;
     } else {
         return fail(r, TOOL_EINVAL, "gui_window", args,
@@ -591,7 +801,7 @@ static int t_gui_window(const tool_call_t *c, tool_result_t *r) {
 
 static const char *const gui_window_functions[] = {
     "focus", "raise", "move", "resize", "hide", "show", "close",
-    "set_title", "set_chrome", NULL
+    "set_title", "set_chrome", "load_prefs", NULL
 };
 
 static const tool_t gui_window_tool = {
@@ -599,22 +809,31 @@ static const tool_t gui_window_tool = {
     .functions = gui_window_functions,
     .description =
         "Act on one window: focus (which also raises it), raise, move, resize, "
-        "hide, show, close, set_title, or set_chrome. Ids come from gui_list. "
-        "set_title changes the title bar text live. set_chrome sets per-window "
-        "chrome colours (title_bg, title_fg, frame as #RRGGBB) and no_close "
-        "(true/false); omitted fields keep their current value. Chrome set here "
-        "OR in the app document \"chrome\" section both apply.",
+        "hide, show, close, set_title, set_chrome, or load_prefs. Ids come from "
+        "gui_list. set_title changes the title bar text live. set_chrome sets "
+        "per-window chrome: colours (title_bg, title_fg, frame as #RRGGBB), "
+        "no_close (bool), title_h (bar height px, e.g. 12 compact/28 tall), "
+        "close_w (button size px); omitted fields keep current value. Add "
+        "persist:true to write the settings to /disk/gui_prefs.json so they "
+        "survive reboots. load_prefs loads that file (no id needed) and applies "
+        "matching chrome to any window opened afterwards; add an agenda boot "
+        "item to re-apply automatically on every reboot.",
     .input_schema =
         "{\"type\":\"object\",\"properties\":{"
         "\"id\":{\"type\":\"integer\",\"description\":\"id from gui_list\"},"
         "\"action\":{\"type\":\"string\",\"enum\":[\"focus\",\"raise\",\"move\","
-        "\"resize\",\"hide\",\"show\",\"close\",\"set_title\",\"set_chrome\"]},"
+        "\"resize\",\"hide\",\"show\",\"close\",\"set_title\",\"set_chrome\","
+        "\"load_prefs\"]},"
         "\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},"
         "\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},"
         "\"title\":{\"type\":\"string\"},"
         "\"title_bg\":{\"type\":\"string\"},\"title_fg\":{\"type\":\"string\"},"
-        "\"frame\":{\"type\":\"string\"},\"no_close\":{\"type\":\"boolean\"}"
-        "},\"required\":[\"id\",\"action\"]}",
+        "\"frame\":{\"type\":\"string\"},\"no_close\":{\"type\":\"boolean\"},"
+        "\"title_h\":{\"type\":\"integer\",\"description\":\"title bar height in pixels (4-127)\"},"
+        "\"close_w\":{\"type\":\"integer\",\"description\":\"close button size in pixels (2-127)\"},"
+        "\"persist\":{\"type\":\"boolean\",\"description\":\"if true, write chrome to /disk/gui_prefs.json\"},"
+        "\"file\":{\"type\":\"string\",\"description\":\"path for load_prefs action\"}"
+        "},\"required\":[\"action\"]}",
     .flags  = TOOL_MUTATES,
     .invoke = t_gui_window,
 };

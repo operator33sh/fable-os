@@ -97,6 +97,37 @@ static gui_stats_t st;
 
 const gui_stats_t *gui_stats(void) { return &st; }
 
+/* ====================================================================== */
+/* per-title chrome preferences                                           */
+/* ====================================================================== */
+
+typedef struct { char title[GUI_TITLE_MAX]; gui_chrome_t chrome; } gui_pref_t;
+static gui_pref_t g_prefs[GUI_PREFS_MAX];
+static int        g_nprefs = 0;
+
+void gui_prefs_set(const char *title, const gui_chrome_t *c) {
+    if (!title || !c) return;
+    for (int i = 0; i < g_nprefs; i++) {
+        size_t j = 0;
+        while (j < GUI_TITLE_MAX - 1 && g_prefs[i].title[j] &&
+               g_prefs[i].title[j] == title[j]) j++;
+        if (!g_prefs[i].title[j] && !title[j]) {
+            g_prefs[i].chrome = *c;
+            return;
+        }
+    }
+    if (g_nprefs >= GUI_PREFS_MAX) return;
+    size_t k = 0;
+    while (k < GUI_TITLE_MAX - 1 && title[k]) {
+        g_prefs[g_nprefs].title[k] = title[k]; k++;
+    }
+    g_prefs[g_nprefs].title[k] = '\0';
+    g_prefs[g_nprefs].chrome   = *c;
+    g_nprefs++;
+}
+
+void gui_prefs_clear(void) { g_nprefs = 0; }
+
 /* ---- the console's cursor and its scroll counter -------------------------
  * In the kernel both come from lib/base.c; on the host a test supplies them,
  * which is what makes the scroll case assertable without a console at all. */
@@ -163,10 +194,21 @@ gui_rect_t gui_frame_rect(const gui_window_t *w) {
     return w ? w->frame : gui_rect(0, 0, 0, 0);
 }
 
+static int32_t w_title_h(const gui_window_t *w) {
+    if (w && (w->chrome.set & GUI_CHROME_TITLE_H) && w->chrome.title_h > 0)
+        return (int32_t)(uint8_t)w->chrome.title_h;
+    return GUI_TITLE_H;
+}
+static int32_t w_close_w(const gui_window_t *w) {
+    if (w && (w->chrome.set & GUI_CHROME_CLOSE_W) && w->chrome.close_w > 0)
+        return (int32_t)(uint8_t)w->chrome.close_w;
+    return GUI_CLOSE_W;
+}
+
 static gui_rect_t title_rect(const gui_window_t *w) {
     if (!w) return gui_rect(0, 0, 0, 0);
     return gui_rect(w->frame.x + GUI_BORDER, w->frame.y + GUI_BORDER,
-                    w->frame.w - 2 * GUI_BORDER, GUI_TITLE_H);
+                    w->frame.w - 2 * GUI_BORDER, w_title_h(w));
 }
 
 static fb_color_t w_title_bg(const gui_window_t *w, int focused) {
@@ -188,18 +230,19 @@ static gui_rect_t close_rect(const gui_window_t *w) {
     if (w->chrome.set & GUI_CHROME_NOCLOSE)  no_close = 1;
     if (w->chrome.set & GUI_CHROME_HASCLOSE) no_close = 0;
     if (no_close) return gui_rect(0, 0, 0, 0);
-    gui_rect_t t = title_rect(w);
-    if (t.w < GUI_CLOSE_W + 6 || t.h < GUI_CLOSE_W) return gui_rect(0, 0, 0, 0);
-    return gui_rect(t.x + t.w - GUI_CLOSE_W - 3,
-                    t.y + (t.h - GUI_CLOSE_W) / 2, GUI_CLOSE_W, GUI_CLOSE_W);
+    gui_rect_t t  = title_rect(w);
+    int32_t    cw = w_close_w(w);
+    if (t.w < cw + 6 || t.h < cw) return gui_rect(0, 0, 0, 0);
+    return gui_rect(t.x + t.w - cw - 3,
+                    t.y + (t.h - cw) / 2, cw, cw);
 }
 
 gui_rect_t gui_client_rect(const gui_window_t *w) {
     if (!w) return gui_rect(0, 0, 0, 0);
     int32_t x = w->frame.x + GUI_BORDER;
-    int32_t y = w->frame.y + GUI_BORDER + GUI_TITLE_H;
+    int32_t y = w->frame.y + GUI_BORDER + w_title_h(w);
     int32_t cw = w->frame.w - 2 * GUI_BORDER;
-    int32_t chh = w->frame.h - 2 * GUI_BORDER - GUI_TITLE_H;
+    int32_t chh = w->frame.h - 2 * GUI_BORDER - w_title_h(w);
     if (cw < 0) cw = 0;
     if (chh < 0) chh = 0;
     return gui_rect(x, y, cw, chh);
@@ -727,6 +770,16 @@ uint32_t gui_window_open(const char *title, int32_t x, int32_t y,
         console_resync();
         pointer_first_use();
         ptr_visible = 1;
+    }
+    /* Apply any per-title chrome preference registered by gui_prefs_set(). */
+    for (int pi = 0; pi < g_nprefs; pi++) {
+        size_t pj = 0;
+        while (pj < GUI_TITLE_MAX - 1 && g_prefs[pi].title[pj] &&
+               g_prefs[pi].title[pj] == win->title[pj]) pj++;
+        if (!g_prefs[pi].title[pj] && !win->title[pj]) {
+            win->chrome = g_prefs[pi].chrome;
+            break;
+        }
     }
     gui_window_focus(win->id);
     damage_rect(win->frame);
