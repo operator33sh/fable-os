@@ -92,6 +92,38 @@ static const char SOVEREIGN_MIRROR[] =
 #define PERSONA_BUF 4096
 #define PERSONAS_DIR "/disk/personas"
 
+static int parse_obj(const tool_call_t *c, json_value_t *obj) {
+    const char *p = "{}";
+    size_t      n = 2;
+    if (c && c->input && c->input_len) { p = c->input; n = c->input_len; }
+    if (json_parse(p, n, obj) != JSON_OK) return TOOL_EINVAL;
+    if (obj->type != JSON_OBJECT) return TOOL_EINVAL;
+    return TOOL_OK;
+}
+
+static int f_str(const json_value_t *o, const char *key, char *dst, size_t cap) {
+    json_value_t v;
+    int rc = json_get(o, key, &v);
+    if (rc == JSON_ENOENT) return 0;
+    if (rc != JSON_OK) return -1;
+    if (v.type == JSON_NULL) return 0;
+    if (v.type != JSON_STRING) return -1;
+    size_t n = 0;
+    rc = json_str(&v, dst, cap, &n);
+    if (rc == JSON_ENOSPC) return -2;
+    if (rc != JSON_OK) return -1;
+    for (size_t i = 0; i < n; i++) if (dst[i] == '\0') return -3;
+    return 1;
+}
+
+static int streq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    size_t i = 0;
+    for (; a[i] && a[i] == b[i]; i++)
+        if (i > 64) return 0;
+    return a[i] == '\0' && b[i] == '\0';
+}
+
 static int fail(tool_result_t *r, int err, const char *op, const char *args,
                 const char *fmt, ...) {
     char msg[352];
