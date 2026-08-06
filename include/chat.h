@@ -453,4 +453,11 @@ void chat_set_max_rounds(unsigned n);
 const char *chat_system_prompt(void);
 const char *chat_last_response_text(void);  /* last model prose from this turn */
 
+/* Persona override: replaces the OS system prompt for all subsequent model
+ * calls until chat_persona_clear() is called.  chat_active_persona() returns
+ * the active text, or NULL when the OS default is in effect. */
+void        chat_persona_set   (const char *text);
+void        chat_persona_clear (void);
+const char *chat_active_persona(void);
+
 #endif /* CHAT_H */

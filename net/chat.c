@@ -266,6 +266,31 @@ static const char SYSTEM_PROMPT[] =
 const char *chat_system_prompt(void) { return SYSTEM_PROMPT; }
 
 /* ====================================================================== */
+/* persona override                                                        */
+/* ====================================================================== */
+
+/* A persona replaces the OS system prompt for the duration of a session.
+ * The buffer is set by chat_persona_set() and cleared by chat_persona_clear().
+ * When active, every model_request_t uses the persona text instead of
+ * SYSTEM_PROMPT, so the model adopts the persona's role completely.
+ * Clearing it restores normal OS behaviour without resetting conversation
+ * history, so a persona session can hand off back to the OS naturally. */
+#define PERSONA_MAX 4096
+static char g_persona[PERSONA_MAX];
+
+void chat_persona_set(const char *text) {
+    size_t i = 0;
+    while (i < PERSONA_MAX - 1 && text[i]) { g_persona[i] = text[i]; i++; }
+    g_persona[i] = '\0';
+}
+
+void chat_persona_clear(void) { g_persona[0] = '\0'; }
+
+const char *chat_active_persona(void) {
+    return g_persona[0] ? g_persona : (const char *)0;
+}
+
+/* ====================================================================== */
 /* fixed storage                                                           */
 /* ====================================================================== */
 
@@ -699,7 +724,7 @@ static int build_request(size_t *out_len, int offer_tools) {
         model_request_t rq;
         rq.model         = (const char *)0;
         rq.max_tokens    = CHAT_MAX_OUTPUT_TOKENS;
-        rq.system        = SYSTEM_PROMPT;
+        rq.system        = g_persona[0] ? g_persona : SYSTEM_PROMPT;
         rq.tools         = offer_len ? g_state.chat.tools_buf : (const char *)0;
         rq.tools_len     = offer_len;
         rq.messages      = msgs;
