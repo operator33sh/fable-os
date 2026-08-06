@@ -26,6 +26,7 @@
  */
 
 #include "tool.h"
+#include "json.h"
 #include "chat.h"
 #include "trace.h"
 #ifndef FABLEOS_HOSTTEST
@@ -91,13 +92,17 @@ static const char SOVEREIGN_MIRROR[] =
 #define PERSONA_BUF 4096
 #define PERSONAS_DIR "/disk/personas"
 
-static int fail(tool_result_t *r, int err, const char *args,
+static int fail(tool_result_t *r, int err, const char *op, const char *args,
                 const char *fmt, ...) {
-    char msg[256];
+    char msg[352];
     va_list ap; va_start(ap, fmt); vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    trace_fail("persona", args, "%s", msg);
+    r->is_error  = 1;
+    r->len       = 0;
+    r->truncated = 0;
+    if (r->buf && r->cap) r->buf[0] = '\0';
     tool_result_printf(r, "error: %s", msg);
+    trace_err(err, op, "%s", args ? args : "");
     return err;
 }
 
@@ -108,14 +113,14 @@ static int fail(tool_result_t *r, int err, const char *args,
 static int t_persona(const tool_call_t *c, tool_result_t *r) {
     json_value_t in;
     if (parse_obj(c, &in) != TOOL_OK)
-        return fail(r, TOOL_EINVAL, "",
+        return fail(r, TOOL_EINVAL, "persona", "",
                     "input must be a JSON object, e.g. "
                     "{\"action\":\"list\"} or "
                     "{\"action\":\"load\",\"file\":\"/disk/personas/sovereign_mirror.txt\"}");
 
     char act[24] = {0};
     if (f_str(&in, "action", act, sizeof act) != 1)
-        return fail(r, TOOL_EINVAL, "",
+        return fail(r, TOOL_EINVAL, "persona", "",
                     "\"action\" is required: list, load, active, reset, install");
 
     /* ------------------------------------------------------------------ */
@@ -179,14 +184,14 @@ static int t_persona(const tool_call_t *c, tool_result_t *r) {
     if (streq(act, "install")) {
         char name[48] = {0};
         if (f_str(&in, "name", name, sizeof name) != 1)
-            return fail(r, TOOL_EINVAL, "action=install",
+            return fail(r, TOOL_EINVAL, "persona", "action=install",
                         "\"name\" is required, e.g. name=sovereign_mirror");
 
         const char *text = (const char *)0;
         if (streq(name, "sovereign_mirror"))
             text = SOVEREIGN_MIRROR;
         else
-            return fail(r, TOOL_EINVAL, "action=install",
+            return fail(r, TOOL_EINVAL, "persona", "action=install",
                         "unknown built-in persona \"%s\"; known: sovereign_mirror",
                         name);
 
@@ -207,7 +212,7 @@ static int t_persona(const tool_call_t *c, tool_result_t *r) {
 
         file_t *fh = vfs_open(path, O_WRONLY | O_CREAT | O_TRUNC);
         if (!fh)
-            return fail(r, TOOL_EINVAL, "action=install",
+            return fail(r, TOOL_EINVAL, "persona", "action=install",
                         "could not create %s", path);
         vfs_write(fh, text, (uint64_t)tlen);
         vfs_close(fh);
@@ -227,12 +232,12 @@ static int t_persona(const tool_call_t *c, tool_result_t *r) {
     if (streq(act, "load")) {
         char file[128] = {0};
         if (f_str(&in, "file", file, sizeof file) != 1)
-            return fail(r, TOOL_EINVAL, "action=load",
+            return fail(r, TOOL_EINVAL, "persona", "action=load",
                         "\"file\" path is required");
 
         file_t *fh = vfs_open(file, O_RDONLY);
         if (!fh)
-            return fail(r, TOOL_ENOENT, "action=load",
+            return fail(r, TOOL_ENOENT, "persona", "action=load",
                         "file not found: %s", file);
 
         static char pbuf[PERSONA_BUF];
@@ -240,7 +245,7 @@ static int t_persona(const tool_call_t *c, tool_result_t *r) {
         vfs_close(fh);
 
         if (n <= 0)
-            return fail(r, TOOL_EINVAL, "action=load",
+            return fail(r, TOOL_EINVAL, "persona", "action=load",
                         "could not read %s", file);
         pbuf[n] = '\0';
 
@@ -300,7 +305,7 @@ static const tool_t persona_tool = {
         "},"
         "\"required\":[\"action\"]"
         "}",
-    .fn = t_persona,
+    .invoke = t_persona,
 };
 
 #ifdef FABLEOS_HOSTTEST
